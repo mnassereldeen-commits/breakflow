@@ -430,3 +430,6 @@ footer.foot { text-align: center; color: var(--ink-3); font-size: 12px; padding:
   .card { box-shadow: none; border-color: #ccc; background: #fff; }
   header.top, .btn, .tabs { display: none !important; }
 }
+
+.pill.signout { border-color: rgba(248,113,113,.32); color: #fca5a5; }
+.pill.signout:hover { border-color: rgba(248,113,113,.6); background: rgba(248,113,113,.12); color: #fecaca; }

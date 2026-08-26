@@ -15,6 +15,7 @@ import { FIREBASE_CONFIG, DB_ROOT, DEFAULTS } from "./config.js";
 const SDK = "https://www.gstatic.com/firebasejs/10.12.2";
 const LS_CFG = "breakflow.fbconfig";
 const LS_DATA = "breakflow.localdb";
+const LS_DEMO = "breakflow.demo";
 
 export const STATES = {
   QUEUED: "queued", ACTIVE: "active", OVER: "over",
@@ -23,7 +24,27 @@ export const STATES = {
 const CLOSED = [STATES.DONE, STATES.CANCELLED, STATES.DENIED];
 const OPEN = [STATES.QUEUED, STATES.ACTIVE, STATES.OVER];
 
-export const ROLES = { AGENT: "agent", ADMIN: "admin" };
+/* ------------------------------------------------------------------
+   Admins are decided by EMAIL, held in /admins as { emailKey: true }.
+   Nothing about an agent's own record can make them an admin, so there
+   is no promotion path to abuse - the same check runs in the rules.
+   ------------------------------------------------------------------ */
+export function emailKey(email) {
+  return String(email || "").trim().toLowerCase().replace(/\./g, ",");
+}
+export function isAdminEmail(state, email) {
+  if (!email) return false;
+  return (state.admins || {})[emailKey(email)] === true;
+}
+export function isAdminAgent(state, agent) {
+  return !!agent && isAdminEmail(state, agent.email);
+}
+export function adminEmails(state) {
+  return Object.keys(state.admins || {})
+    .filter((k) => state.admins[k] === true)
+    .map((k) => k.replace(/,/g, "."))
+    .sort();
+}
 
 /** Hard ceiling on any single break, in minutes. */
 export const MAX_BREAK_MINUTES = 60;
@@ -88,6 +109,7 @@ function withDefaults(s) {
       allowSelfEnroll: true,
       hasAdmin: false
     }, st.settings || {}),
+    admins: st.admins || {},
     breakTypes: st.breakTypes || {},
     agents: st.agents || {},
     sessions: st.sessions || {}
@@ -132,7 +154,7 @@ class Store {
     };
   }
   now() { return Date.now() + this.offset; }
-  isAdmin() { return !!(this.member && this.member.role === ROLES.ADMIN); }
+  isAdmin() { return !!(this.user && isAdminEmail(this.state, this.user.email)); }
   uid() { return this.user ? this.user.uid : null; }
 
   _emit() { this._changes.emit(this.state); }
@@ -147,7 +169,15 @@ class Store {
   /* ---------------- connect ---------------- */
   async connect() {
     const cfg = resolveConfig();
-    if (!cfg) { await this._connectLocal(); return this.mode; }
+    if (!cfg) {
+      /* Don't quietly pretend to work. Demo mode is opt-in, and it
+         remembers the choice so a reload doesn't kick you out of it. */
+      if (localStorage.getItem(LS_DEMO) === "1") { await this._connectLocal(); return this.mode; }
+      this.mode = "unconfigured";
+      this.access = "unconfigured";
+      this._pushStatus();
+      return this.mode;
+    }
     try {
       await this._connectFirebase(cfg);
     } catch (err) {
@@ -236,36 +266,48 @@ class Store {
     this.touch();
   }
 
-  /** Create this user's roster record if the roster is open, else block them. */
+  /** Create this user's roster record if they're allowed in, else block them. */
   async _ensureMembership() {
     const uid = this.user.uid;
+    const email = this.user.email || "";
+
+    /* The very first sign-in claims the board by putting its own email
+       in /admins. After that the list can only be changed by an admin. */
+    const bootstrap = !Object.keys(this.state.admins || {}).length;
+
     if (this.state.agents[uid]) {
       this.member = this.state.agents[uid];
       this.access = "ok";
+      if (bootstrap && email) {
+        try { await this.update({ ["admins/" + emailKey(email)]: true }, "claim the board"); } catch (e) { /* ignore */ }
+      }
       this._pushStatus();
       return;
     }
-    const bootstrap = !this.state.settings.hasAdmin;
+
     const open = this.state.settings.allowSelfEnroll !== false;
-    if (!bootstrap && !open) {
+    const listedAdmin = isAdminEmail(this.state, email);
+    /* A listed admin can always get in, even with the roster locked -
+       otherwise adding a second admin then locking would shut them out. */
+    if (!bootstrap && !open && !listedAdmin) {
       this.access = "not-on-roster";
       this._pushStatus();
       return;
     }
+
     const rec = {
       uid: uid,
       name: this.user.name || "New agent",
-      email: this.user.email || "",
+      email: email,
       photo: this.user.photo || "",
       team: "",
-      role: bootstrap ? ROLES.ADMIN : ROLES.AGENT,
       createdAt: Date.now(),
       lastSeen: Date.now()
     };
     const patch = { ["agents/" + uid]: rec };
-    if (bootstrap) patch["settings/hasAdmin"] = true;
+    if (bootstrap && email) patch["admins/" + emailKey(email)] = true;
     try {
-      await this.update(patch);
+      await this.update(patch, "join the roster");
       this.member = rec;
       this.access = "ok";
       this.bootstrapped = bootstrap;
@@ -284,6 +326,7 @@ class Store {
     if (Object.keys(this.state.breakTypes || {}).length) return;
     if (!this.isAdmin()) return;
     await this.update({
+      "settings/hasAdmin": true,
       "settings/teamName": this.state.settings.teamName || DEFAULTS.teamName,
       "settings/globalMaxConcurrent": DEFAULTS.globalMaxConcurrent,
       "settings/graceMinutes": DEFAULTS.graceMinutes,
@@ -325,40 +368,46 @@ class Store {
   }
 
   /* ---------------- local demo ---------------- */
+  startLocalDemo() { localStorage.setItem(LS_DEMO, "1"); location.reload(); }
+  exitLocalDemo() {
+    localStorage.removeItem(LS_DEMO);
+    localStorage.removeItem(LS_DATA);
+    location.reload();
+  }
+
   async _connectLocal() {
     this.mode = "local";
     this.online = true;
-    this.user = { uid: "local-user", email: "", name: "You (local demo)", photo: "" };
+    this.user = { uid: "local-user", email: "you@local.demo", name: "You (local demo)", photo: "" };
     const load = () => {
       let raw = null;
       try { raw = JSON.parse(localStorage.getItem(LS_DATA) || "null"); } catch (e) { /* ignore */ }
+      const demoUser = {
+        uid: "local-user", name: "You (local demo)", email: "you@local.demo",
+        team: "", createdAt: Date.now(), lastSeen: Date.now()
+      };
       if (!raw || !raw.breakTypes || !Object.keys(raw.breakTypes).length) {
         raw = {
           settings: {
             teamName: DEFAULTS.teamName, globalMaxConcurrent: DEFAULTS.globalMaxConcurrent,
             graceMinutes: DEFAULTS.graceMinutes, allowSelfEnroll: true, hasAdmin: true
           },
+          admins: { [emailKey(demoUser.email)]: true },
           breakTypes: DEFAULTS.breakTypes,
-          agents: {
-            "local-user": {
-              uid: "local-user", name: "You (local demo)", email: "", team: "",
-              role: ROLES.ADMIN, createdAt: Date.now(), lastSeen: Date.now()
-            }
-          },
+          agents: { "local-user": demoUser },
           sessions: {}
         };
         localStorage.setItem(LS_DATA, JSON.stringify(raw));
       }
       this.state = withDefaults(raw);
-      /* make sure the demo user exists, even against data saved by an
-         older version that keyed the roster differently */
-      if (!this.state.agents["local-user"]) {
-        this.state.agents["local-user"] = {
-          uid: "local-user", name: "You (local demo)", email: "", team: "",
-          role: ROLES.ADMIN, createdAt: Date.now(), lastSeen: Date.now()
-        };
-        localStorage.setItem(LS_DATA, JSON.stringify(this.state));
+      /* keep the demo usable against data saved by an older version */
+      let repair = false;
+      if (!this.state.agents["local-user"]) { this.state.agents["local-user"] = demoUser; repair = true; }
+      if (!this.state.admins[emailKey(demoUser.email)]) {
+        this.state.admins[emailKey(demoUser.email)] = true;
+        repair = true;
       }
+      if (repair) localStorage.setItem(LS_DATA, JSON.stringify(this.state));
       this.member = this.state.agents["local-user"];
       this.access = "ok";
     };
@@ -486,7 +535,7 @@ export function sortedAgents(state) {
 }
 
 export function supervisors(state) {
-  return sortedAgents(state).filter((a) => a.role === ROLES.ADMIN);
+  return sortedAgents(state).filter((a) => isAdminAgent(state, a));
 }
 
 export function isPresent(state, uid, now) {

@@ -29,13 +29,15 @@ Realtime Database.
 
 **Admin view — `admin.html`**
 
-No PIN — you get in because your account has the admin role, and the database agrees.
+No PIN. You get in because your **email address** is on the admin list, and the database
+rules check the same list. Nothing an agent does to their own record can promote them —
+there is no role field to forge.
 
 - **Live board** — every active break with a progress bar and countdown; one-click *Back*, *+5m*, *−5m*; put someone on break manually, bypassing the queue.
 - **How many can go at the same time** — a stepper for the whole floor and one per break type, showing slots in use and who's waiting. Raise a number and the queue promotes people instantly; lower it and nobody's running break is interrupted.
 - **Queue** — slot pressure per break type, approve / start-now / deny individual requests, or clear the queue.
 - **Break policies** — name, minutes (1–60), how many at once, colour, icon, and whether a supervisor must approve it.
-- **Roster & access** — everyone who has signed in, flip anyone between agent and admin, and the one switch that matters: **lock the roster** so no new accounts can join.
+- **Roster & access** — the **admin list** (add or remove an email, before or after that person has ever signed in), everyone who has signed in, and the one switch that matters: **lock the roster** so no new accounts can join.
 - **Reports** — per-day, per-agent: breaks taken, total time out, average, overstays, breakdown by type. CSV for a day or all history, plus a print view.
 - **Settings** — team name, floor-wide cap, overtime grace, and housekeeping.
 
@@ -103,15 +105,22 @@ Priority is `#cfg=` in the URL → this browser's saved config → `config.js`.
 
 Do this before you share the link. Test mode leaves the database open to anyone.
 
-### 4. Claim the board, then lock it
+### 4. Claim the board, add your admins, then lock it
 
-1. **You sign in first, alone.** The first account to sign in becomes the admin — so make
-   sure that's you before anyone else opens the link.
-2. Share the link. Each agent signs in with their work Google account and appears on your
-   roster automatically.
-3. When everyone's in: **Admin → Roster & access → Lock the roster.** From then on, a new
-   account that opens the link is told to ask a supervisor. Reopen it any time you need to
-   add someone.
+1. **You sign in first, alone.** The first account to sign in claims the board by putting
+   its own email on the admin list — so make sure that's you before anyone else opens the
+   link.
+2. **Admin → Roster & access → Admins → add your co-supervisor's email.** You can add it
+   before they've ever signed in; when they do, they land straight in the panel.
+3. Share the link. Each agent signs in with their work Google account and appears on your
+   roster automatically, as an agent.
+4. When everyone's in: **Roster & access → Lock the roster.** From then on a new account
+   that opens the link is told to ask a supervisor. Listed admins can always get in, locked
+   or not, so you can't shut your own co-admin out. Reopen it whenever you need to add
+   someone.
+
+Admin lives in the database (`/breakflow/admins`), keyed by email — *not* in this repo, so
+your team's addresses don't end up published on a public GitHub page.
 
 ### 5. Check it actually holds (2 minutes, worth doing)
 
@@ -125,10 +134,16 @@ await BreakFlow.store.update({ "sessions/<their-session-id>/state": "done" })
 It should fail with `PERMISSION_DENIED`, and the app should show a red
 "Not allowed" toast. If it succeeds, the rules from step 3 aren't published.
 
+### Signing out
+
+The header has a **Sign out** button next to your name whenever you're signed in — needed
+on shared floor PCs, where each agent signs in and out per shift.
+
 ### Without Firebase
 
-The app still runs — it falls back to `localStorage` with a single local admin user, no
-sign-in. Fine for a demo, useless for a team; the header pill says *This device only*.
+With no database configured the app says so and stops, rather than pretending to work.
+There's a **Try the local demo** button: `localStorage`, one local admin user, no sign-in,
+nothing shared with anyone. A banner keeps saying so, and *Exit demo* leaves it.
 
 ---
 
@@ -154,7 +169,8 @@ What the rules genuinely enforce, once published:
   on the roster can.
 - You can create and modify **only your own** break, and only while it's still open.
 - Nobody but an admin can delete a break record, or touch one that has closed.
-- Nobody can promote themselves to admin.
+- Nobody can promote themselves to admin. Admin is an email on a list only admins can
+  edit; an agent's own record carries no privilege at all, so there's nothing to forge.
 - Break length is capped at 60 minutes at the database level.
 
 What it does *not* do:

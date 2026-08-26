@@ -9,43 +9,50 @@
 //   * You may create and change YOUR OWN break, and nobody else's.
 //   * You cannot delete or rewrite a break that has already closed,
 //     so an overstay can't be erased after the fact.
-//   * You cannot promote yourself to admin.
+//   * Admins are decided by EMAIL, in /breakflow/admins. There is no
+//     way for an agent to promote themselves - nothing in their own
+//     record grants anything.
 //   * Admins can do all of it.
 //
-// Optional extra lock: to accept only company Google accounts, add this to
-// the ".read" line below (and to each ".write"), with your own domain:
+// The admin list is { "email,with,dots,as,commas": true }. The first
+// person to sign in claims the board by adding their own email; after
+// that only an existing admin can change the list.
+//
+// Optional extra lock: to accept only company Google accounts, add
 //     && auth.token.email.endsWith('@your-company.com')
+// to the ".read" line and to each ".write" line below.
 
 {
   "rules": {
     "breakflow": {
 
-      // Roster members always. Anyone signed in while the roster is still
-      // open, so the team can enrol themselves during onboarding.
-      ".read": "auth != null && (root.child('breakflow/agents').child(auth.uid).exists() || root.child('breakflow/settings/allowSelfEnroll').val() != false)",
+      // Roster members and listed admins always. Anyone signed in while
+      // the roster is still open, so the team can enrol during onboarding.
+      ".read": "auth != null && (root.child('breakflow/agents').child(auth.uid).exists() || root.child('breakflow/admins').child(auth.token.email.lower().replace('.', ',')).val() == true || root.child('breakflow/settings/allowSelfEnroll').val() != false)",
 
-      // Floor policy: admins. Open only until the first admin exists,
-      // so the very first person to sign in can claim the board.
+      // WHO IS AN ADMIN. Writable by an existing admin, or by the very
+      // first person to sign in while the list is still empty.
+      "admins": {
+        ".write": "root.child('breakflow/admins').child(auth.token.email.lower().replace('.', ',')).val() == true || !root.child('breakflow/admins').exists()",
+        "$emailKey": { ".validate": "newData.isBoolean()" }
+      },
+
+      // Floor policy: admins only (open once, for first-run setup).
       "settings": {
-        ".write": "root.child('breakflow/agents').child(auth.uid).child('role').val() == 'admin' || root.child('breakflow/settings/hasAdmin').val() != true"
+        ".write": "root.child('breakflow/admins').child(auth.token.email.lower().replace('.', ',')).val() == true || root.child('breakflow/settings/hasAdmin').val() != true"
       },
 
       // Break policies: admins only.
       "breakTypes": {
-        ".write": "root.child('breakflow/agents').child(auth.uid).child('role').val() == 'admin'"
+        ".write": "root.child('breakflow/admins').child(auth.token.email.lower().replace('.', ',')).val() == true"
       },
 
       "agents": {
         "$uid": {
-          // Edit your own record; admins edit anyone. Joining the roster
-          // requires the roster to still be open.
-          ".write": "root.child('breakflow/agents').child(auth.uid).child('role').val() == 'admin' || ($uid == auth.uid && (data.exists() || root.child('breakflow/settings/allowSelfEnroll').val() != false))",
-
-          // No self-promotion. Only an existing admin hands out the admin
-          // role - except the very first sign-in, which claims it.
-          "role": {
-            ".validate": "(newData.val() == 'agent' || newData.val() == 'admin') && (newData.val() == data.val() || newData.val() == 'agent' || root.child('breakflow/agents').child(auth.uid).child('role').val() == 'admin' || root.child('breakflow/settings/hasAdmin').val() != true)"
-          },
+          // Edit your own record; admins edit anyone. Joining needs the
+          // roster to be open - unless your email is on the admin list,
+          // so adding an admin then locking can't shut them out.
+          ".write": "root.child('breakflow/admins').child(auth.token.email.lower().replace('.', ',')).val() == true || ($uid == auth.uid && (data.exists() || root.child('breakflow/settings/allowSelfEnroll').val() != false))",
 
           "uid": { ".validate": "newData.val() == $uid" },
           "name": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 80" },
@@ -61,7 +68,7 @@
           // create : only a break whose agentId is you
           // change : only your own, and only while it is still open
           // delete : never (admins only)
-          ".write": "root.child('breakflow/agents').child(auth.uid).child('role').val() == 'admin' || (!data.exists() && newData.child('agentId').val() == auth.uid) || (data.exists() && newData.exists() && data.child('agentId').val() == auth.uid && newData.child('agentId').val() == auth.uid && data.child('state').val() != 'done' && data.child('state').val() != 'cancelled' && data.child('state').val() != 'denied')",
+          ".write": "root.child('breakflow/admins').child(auth.token.email.lower().replace('.', ',')).val() == true || (!data.exists() && newData.child('agentId').val() == auth.uid) || (data.exists() && newData.exists() && data.child('agentId').val() == auth.uid && newData.child('agentId').val() == auth.uid && data.child('state').val() != 'done' && data.child('state').val() != 'cancelled' && data.child('state').val() != 'denied')",
 
           "agentId": { ".validate": "newData.isString() && newData.val().length <= 128" },
           "agentName": { ".validate": "newData.isString() && newData.val().length <= 80" },

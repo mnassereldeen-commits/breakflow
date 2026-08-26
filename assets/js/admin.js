@@ -1,23 +1,24 @@
 /* ============================================================
    BreakFlow - supervisor panel
 
-   No PIN. You get in because your signed-in account has the admin
-   role, and the database rules agree. Everything you do here is
-   recorded under your name.
+   No PIN and no role field. You get in because your email is on the
+   admin list in the database, and the rules check the same thing.
+   Everything you do here is recorded under your name.
    ============================================================ */
 
 import {
-  store, STATES, ROLES, MAX_BREAK_MINUTES, clampMinutes, reconcile,
+  store, STATES, MAX_BREAK_MINUTES, clampMinutes, reconcile,
   sortedTypes, sortedAgents, supervisors, occupancy, queueFor, listSessions,
   onBreakNow, endBreak, denyQueued, approveQueued, forceStart, adjustTime,
-  startForAgent, dayKey, isOver, isPresent, encodeConfig, activeConfig
+  startForAgent, dayKey, isOver, isPresent, encodeConfig, activeConfig,
+  isAdminAgent, adminEmails, emailKey
 } from "./store.js";
 
 import {
   $, el, mmss, hhmm, human, toast, modal, confirmBox, field, input, select,
   mountStatusPill, mountClock, setFavicon, initials, hueFrom,
   csv, download, setupDialog, beep, notify, askNotify, mountErrorToasts,
-  signInGate, notOnRosterGate, identityChip
+  signInGate, notOnRosterGate, identityChip, notConfiguredGate, demoBanner
 } from "./common.js";
 
 let tab = location.hash.replace("#", "") || "live";
@@ -76,6 +77,7 @@ function render() {
     ]));
     return;
   }
+  if (store.mode === "unconfigured") { main.append(notConfiguredGate()); return; }
   if (store.access === "signed-out") { main.append(signInGate(state.settings.teamName)); return; }
   if (store.access === "not-on-roster") { main.append(notOnRosterGate(store.user)); return; }
   if (store.access !== "ok" || !store.member) {
@@ -102,7 +104,8 @@ function render() {
   }
   main.append(nav);
 
-  /* the Roster tab has a fuller version of this, so don't say it twice */
+  if (store.mode === "local") main.append(demoBanner());
+  /* the Roster tab has a fuller version of this, so do not say it twice */
   if (state.settings.allowSelfEnroll !== false && tab !== "roster") main.append(openRosterBanner());
 
   const body = el("div", { class: "stack" });
@@ -122,8 +125,8 @@ function notSupervisor() {
     el("div", { class: "card pad-lg center", style: { maxWidth: "440px" } }, [
       el("h2", { text: "Supervisors only" }),
       el("p", { class: "muted", style: { margin: "10px 0 18px" } }, [
-        "You're signed in as ", el("b", { text: store.member.name }),
-        ", which is an agent account. Ask an existing admin to switch your role over on the Roster tab."
+        "You're signed in as ", el("b", { text: store.user.email || store.member.name }),
+        ", which isn't on the admin list. An existing admin can add your email under Roster & access."
       ]),
       el("div", { class: "btn-row", style: { justifyContent: "center" } }, [
         el("a", { class: "btn primary", href: "index.html", text: "← Back to my breaks" })
@@ -541,7 +544,7 @@ function rosterTab(state, now) {
     const used = mine.filter((s) => s.startedAt).reduce((t, s) => t + Math.max(0, (s.endedAt || now) - s.startedAt), 0);
     const present = isPresent(state, a.uid, now);
     const isSelf = a.uid === store.uid();
-    const lastAdmin = a.role === ROLES.ADMIN && admins.length <= 1;
+    const admin = isAdminAgent(state, a);
 
     rows.append(el("tr", {}, [
       el("td", {}, [el("div", { class: "row" }, [
@@ -553,20 +556,9 @@ function rosterTab(state, now) {
       ])]),
       el("td", { class: "muted", text: a.team || "—" }),
       el("td", {}, [
-        el("button", {
-          class: "role-btn badge " + (a.role === ROLES.ADMIN ? "cy" : ""),
-          title: lastAdmin ? "Keep at least one admin" : "Switch between agent and admin",
-          text: a.role === ROLES.ADMIN ? "⚙ admin" : "agent",
-          onclick: async () => {
-            const next = a.role === ROLES.ADMIN ? ROLES.AGENT : ROLES.ADMIN;
-            if (next === ROLES.AGENT && lastAdmin) { toast("Keep at least one admin on the roster.", "error"); return; }
-            if (next === ROLES.AGENT && isSelf &&
-              !(await confirmBox("Give up your own admin access?", "You'll lose this panel immediately. Another admin would have to give it back.", "Yes, step down"))) return;
-            try { await store.update({ ["agents/" + a.uid + "/role"]: next }, "change a role"); }
-            catch (e) { return; }
-            toast(a.name + " is now " + (next === ROLES.ADMIN ? "an admin" : "an agent"), "ok");
-          }
-        })
+        admin
+          ? el("span", { class: "badge cy", title: "Their email is on the admin list", text: "⚙ admin" })
+          : el("span", { class: "badge", text: "agent" })
       ]),
       el("td", {}, [
         openS
@@ -580,7 +572,7 @@ function rosterTab(state, now) {
         el("button", { class: "btn sm", text: "Edit", onclick: () => editAgent(a) }),
         el("button", {
           class: "btn sm danger", text: "Remove", onclick: async () => {
-            if (lastAdmin) { toast("Keep at least one admin on the roster.", "error"); return; }
+            if (admin && admins.length <= 1) { toast("Take their email off the admin list first.", "error"); return; }
             if (await confirmBox("Remove " + a.name + "?",
               "Their break history stays in reports. If the roster is open they could sign in again and re-join.", "Remove")) {
               await store.update({ ["agents/" + a.uid]: null }, "remove someone");
@@ -595,6 +587,7 @@ function rosterTab(state, now) {
   const link = location.origin + location.pathname.replace(/admin\.html$/, "index.html");
 
   return el("div", { class: "stack" }, [
+    adminsCard(state),
     el("div", { class: "card" }, [
       el("div", { class: "card-head" }, [el("h2", { text: "Who can get in" })]),
       el("div", { class: "access-state " + (open ? "open" : "locked") }, [
@@ -646,6 +639,65 @@ function rosterTab(state, now) {
           rows
         ])
       ]) : el("p", { class: "empty", text: "Nobody has signed in yet. Share the link above." })
+    ])
+  ]);
+}
+
+/** The admin list, by email. This is the whole authorisation story. */
+function adminsCard(state) {
+  const emails = adminEmails(state);
+  const mine = (store.user && store.user.email || "").toLowerCase();
+  const box = el("div", { class: "stack", style: { gap: "8px" } });
+
+  for (const email of emails) {
+    const known = sortedAgents(state).find((a) => (a.email || "").toLowerCase() === email);
+    const isMe = email === mine;
+    box.append(el("div", { class: "conc-row", style: { "--c": "#22d3ee" } }, [
+      el("span", { class: "ico", text: "⚙" }),
+      el("div", { class: "who" }, [
+        el("b", { text: email + (isMe ? "  (you)" : "") }),
+        el("span", { text: known ? "signed in as " + known.name : "hasn't signed in yet" })
+      ]),
+      el("button", {
+        class: "btn sm danger", text: "Remove",
+        onclick: async () => {
+          if (emails.length <= 1) { toast("You'd lock everyone out of the panel. Add another admin first.", "error"); return; }
+          const warn = isMe
+            ? "You'll lose this panel the moment it saves. Another admin would have to add you back."
+            : "They keep their agent account and their break history — they just lose the supervisor panel.";
+          if (!(await confirmBox("Remove " + email + " as an admin?", warn, "Remove admin"))) return;
+          try { await store.update({ ["admins/" + emailKey(email)]: null }, "change the admin list"); }
+          catch (e) { return; }
+          toast(email + " is no longer an admin", "ok");
+        }
+      })
+    ]));
+  }
+
+  const inp = input({ type: "email", placeholder: "colleague@company.com", autocomplete: "off" });
+  const add = async () => {
+    const email = inp.value.trim().toLowerCase();
+    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { toast("That doesn't look like an email address.", "error"); return; }
+    if (emails.includes(email)) { toast("Already an admin.", "info"); return; }
+    try { await store.update({ ["admins/" + emailKey(email)]: true }, "change the admin list"); }
+    catch (e) { return; }
+    inp.value = "";
+    toast(email + " is now an admin", "ok");
+  };
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") add(); });
+
+  return el("div", { class: "card" }, [
+    el("div", { class: "card-head" }, [
+      el("h2", { text: "Admins" }),
+      el("span", { class: "tiny", text: emails.length + " " + (emails.length === 1 ? "address" : "addresses") })
+    ]),
+    el("p", { class: "muted small", style: { marginTop: "-4px" } }, [
+      "Admin is decided by email address, so nothing an agent does to their own account can promote them. Add an address before or after that person signs in — either way works, and a listed admin can always get in even when the roster is locked."
+    ]),
+    box,
+    el("div", { class: "row wrap", style: { marginTop: "12px" } }, [
+      el("div", { style: { flex: "1", minWidth: "220px" } }, [inp]),
+      el("button", { class: "btn primary", text: "＋ Add admin", onclick: add })
     ])
   ]);
 }

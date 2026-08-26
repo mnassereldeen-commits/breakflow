@@ -7,7 +7,7 @@
    ============================================================ */
 
 import {
-  store, STATES, ROLES, reconcile, sortedTypes, sortedAgents, supervisors,
+  store, STATES, isAdminAgent, reconcile, sortedTypes, sortedAgents, supervisors,
   occupancy, queueFor, listSessions, mySession, queuePosition, estimateStart,
   requestBreak, endBreak, cancelQueued, dayKey, graceMs, isOver, isPresent,
   onBreakNow
@@ -17,7 +17,7 @@ import {
   $, el, mmss, hhmm, human, toast, modal, beep, askNotify, notify,
   flashTitle, stopFlash, setBaseTitle, mountStatusPill, mountClock, setFavicon,
   initials, hueFrom, confirmBox, setupDialog, mountErrorToasts,
-  signInGate, notOnRosterGate, identityChip
+  signInGate, notOnRosterGate, identityChip, notConfiguredGate, demoBanner
 } from "./common.js";
 
 const RING_R = 110;
@@ -56,7 +56,7 @@ function render() {
 
   /* the panel link only appears for supervisors */
   const link = document.querySelector('a.pill[href="admin.html"]');
-  if (link) link.hidden = !(me() && me().role === ROLES.ADMIN);
+  if (link) link.hidden = !(me() && isAdminAgent(state, me()));
 
   identityChip($("#idHost"));
 
@@ -68,6 +68,7 @@ function render() {
     main.append(connectionProblem());
     return;
   }
+  if (store.mode === "unconfigured") { main.append(notConfiguredGate()); return; }
   if (store.access === "signed-out") { main.append(signInGate(state.settings.teamName)); return; }
   if (store.access === "not-on-roster") { main.append(notOnRosterGate(store.user)); return; }
   if (store.access !== "ok" || !me()) {
@@ -78,6 +79,7 @@ function render() {
   const now = store.now();
   const mine = mySession(state, store.uid());
 
+  if (store.mode === "local") main.append(demoBanner());
   main.append(el("div", { class: "split" }, [
     el("div", { class: "stack" }, [
       mine ? myBreakCard(state, mine, now) : chooseCard(state, now),

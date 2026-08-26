@@ -2,7 +2,7 @@
    BreakFlow - shared UI helpers
    ============================================================ */
 
-import { store, saveConfig, clearConfig, activeConfig, encodeConfig, ROLES } from "./store.js";
+import { store, saveConfig, clearConfig, activeConfig, encodeConfig, isAdminAgent } from "./store.js";
 
 /* ---------- DOM ----------------------------------------------------- */
 export const $ = (sel, root) => (root || document).querySelector(sel);
@@ -182,12 +182,6 @@ export function stopFlash() {
 }
 export function setBaseTitle(t) { baseTitle = t; if (!flashTimer) document.title = t; }
 
-/* ---------- crypto -------------------------------------------------- */
-export async function sha256(text) {
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("bf:" + text));
-  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
 /* ---------- connection pill ---------------------------------------- */
 export function mountStatusPill(host) {
   const dot = el("span", { class: "dot" });
@@ -294,10 +288,53 @@ export function identityChip(host, opts) {
   const chip = el("button", { class: "pill id-chip", title: "Your account" }, [
     av,
     el("span", { text: name }),
-    m && m.role === ROLES.ADMIN ? el("span", { class: "badge cy", text: "admin" }) : null
+    m && isAdminAgent(store.state, m) ? el("span", { class: "badge cy", text: "admin" }) : null
   ]);
   chip.addEventListener("click", () => accountDialog(opts));
   host.append(chip);
+
+  /* Sign out needs to be one obvious click, not buried in a dialog -
+     shared floor PCs depend on it. */
+  if (store.mode === "firebase") {
+    host.append(el("button", {
+      class: "pill signout", title: "Sign out of BreakFlow",
+      onclick: async () => { await store.signOut(); location.reload(); }
+    }, ["Sign out"]));
+  } else if (store.mode === "local") {
+    host.append(el("button", {
+      class: "pill signout", title: "Leave the local demo",
+      onclick: () => store.exitLocalDemo()
+    }, ["Exit demo"]));
+  }
+}
+
+/** No database configured yet - don't pretend the app is working. */
+export function notConfiguredGate() {
+  return el("div", { class: "gate" }, [
+    el("div", { class: "card pad-lg", style: { maxWidth: "480px" } }, [
+      el("div", { class: "mark big", text: "B" }),
+      el("h2", { class: "center", text: "Not connected yet" }),
+      el("p", { class: "muted center", style: { margin: "10px 0 18px" } },
+        ["BreakFlow needs a Firebase database before anyone can sign in. It takes about five minutes and costs nothing."]),
+      el("div", { class: "btn-row", style: { justifyContent: "center" } }, [
+        el("button", { class: "btn primary", text: "Connect a database", onclick: () => setupDialog() }),
+        el("button", { class: "btn ghost", text: "Try the local demo", onclick: () => store.startLocalDemo() })
+      ]),
+      el("p", { class: "small dim center", style: { marginTop: "16px" } },
+        ["The demo runs entirely in this browser with no sign-in — good for a look around, no use to a team."])
+    ])
+  ]);
+}
+
+/** Banner shown while in the local demo, so nobody mistakes it for live. */
+export function demoBanner() {
+  return el("div", { class: "callout", style: { marginBottom: "16px" } }, [
+    el("div", { class: "row wrap" }, [
+      el("span", {}, ["⚠ Local demo — no sign-in, and nothing is shared with anyone else. Connect a database to go live."]),
+      el("div", { class: "spacer" }),
+      el("button", { class: "btn sm", text: "Connect a database", onclick: () => setupDialog() })
+    ])
+  ]);
 }
 
 function accountDialog(opts) {
@@ -314,7 +351,7 @@ function accountDialog(opts) {
     ]),
     field("Display name", nm, "How your name appears on the board"),
     field("Team", tm),
-    m.role === ROLES.ADMIN ? el("p", { class: "small" }, [
+    isAdminAgent(store.state, m) ? el("p", { class: "small" }, [
       el("span", { class: "badge cy", text: "admin" }), " You can open the supervisor panel."
     ]) : null
   ]), [
