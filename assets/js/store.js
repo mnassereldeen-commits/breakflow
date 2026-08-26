@@ -275,18 +275,21 @@ class Store {
     this._pushStatus();
   }
 
+  /**
+   * First run only: put the default break policies in place.
+   * Writes individual keys rather than a whole settings object - a
+   * blind overwrite could reset hasAdmin and leave the board claimable.
+   */
   async _seedIfEmpty() {
     if (Object.keys(this.state.breakTypes || {}).length) return;
     if (!this.isAdmin()) return;
     await this.update({
-      settings: Object.assign({}, this.state.settings, {
-        teamName: this.state.settings.teamName || DEFAULTS.teamName,
-        globalMaxConcurrent: DEFAULTS.globalMaxConcurrent,
-        graceMinutes: DEFAULTS.graceMinutes,
-        createdAt: Date.now()
-      }),
+      "settings/teamName": this.state.settings.teamName || DEFAULTS.teamName,
+      "settings/globalMaxConcurrent": DEFAULTS.globalMaxConcurrent,
+      "settings/graceMinutes": DEFAULTS.graceMinutes,
+      "settings/createdAt": Date.now(),
       breakTypes: DEFAULTS.breakTypes
-    });
+    }, "set up the board");
   }
 
   /** Presence heartbeat: an absent agent is passed over in the queue. */
