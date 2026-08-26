@@ -24,6 +24,17 @@ export const FIREBASE_CONFIG = {
    teams (e.g. "floor-a" / "floor-b") off one Firebase project. */
 export const DB_ROOT = "breakflow";
 
+/* Agents sign in with a plain username, not an email. Firebase Auth
+   only speaks email, so "sara" becomes "sara@breakflow.local" behind
+   the scenes. Nothing is ever sent to this domain and it does not need
+   to exist.
+
+   If you'd rather use real work email addresses, just type the full
+   address when creating the account - anything containing "@" is used
+   as-is, which also means Firebase can send that person a password
+   reset link. */
+export const LOGIN_DOMAIN = "breakflow.local";
+
 /* Shipped defaults — only used the very first time a database is
    opened. After that, everything is editable in the Admin panel.
 
@@ -34,7 +45,6 @@ export const DEFAULTS = {
   teamName: "Operations Floor",
   globalMaxConcurrent: 3,       // hard ceiling on people away at once
   graceMinutes: 3,              // overtime keeps the slot this long
-  allowSelfEnroll: true,        // open during onboarding, then lock it
   breakTypes: {
     bio:   { id: "bio",   name: "Bio Break",  minutes: 5,  maxConcurrent: 2, color: "#38bdf8", icon: "\u{1F6BB}", requiresApproval: false, order: 1 },
     short: { id: "short", name: "Short Break",minutes: 15, maxConcurrent: 2, color: "#a78bfa", icon: "\u{2615}",  requiresApproval: false, order: 2 },

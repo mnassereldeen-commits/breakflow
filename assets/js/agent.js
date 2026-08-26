@@ -7,7 +7,7 @@
    ============================================================ */
 
 import {
-  store, STATES, isAdminAgent, reconcile, sortedTypes, sortedAgents, supervisors,
+  store, STATES, isAdminAgent, displayLogin, reconcile, sortedTypes, sortedAgents, supervisors,
   occupancy, queueFor, listSessions, mySession, queuePosition, estimateStart,
   requestBreak, endBreak, cancelQueued, dayKey, graceMs, isOver, isPresent,
   onBreakNow
@@ -17,7 +17,7 @@ import {
   $, el, mmss, hhmm, human, toast, modal, beep, askNotify, notify,
   flashTitle, stopFlash, setBaseTitle, mountStatusPill, mountClock, setFavicon,
   initials, hueFrom, confirmBox, setupDialog, mountErrorToasts,
-  signInGate, notOnRosterGate, identityChip, notConfiguredGate, demoBanner
+  signInGate, noAccountGate, identityChip, notConfiguredGate, demoBanner, signInHelp
 } from "./common.js";
 
 const RING_R = 110;
@@ -70,7 +70,7 @@ function render() {
   }
   if (store.mode === "unconfigured") { main.append(notConfiguredGate()); return; }
   if (store.access === "signed-out") { main.append(signInGate(state.settings.teamName)); return; }
-  if (store.access === "not-on-roster") { main.append(notOnRosterGate(store.user)); return; }
+  if (store.access === "no-account") { main.append(noAccountGate(store.user)); return; }
   if (store.access !== "ok" || !me()) {
     main.append(el("div", { class: "card center", style: { padding: "48px" } }, [el("p", { class: "muted", text: "Loading your profile…" })]));
     return;

@@ -2,7 +2,10 @@
    BreakFlow - shared UI helpers
    ============================================================ */
 
-import { store, saveConfig, clearConfig, activeConfig, encodeConfig, isAdminAgent } from "./store.js";
+import {
+  store, saveConfig, clearConfig, activeConfig, encodeConfig,
+  isAdminAgent, displayLogin, isSyntheticEmail
+} from "./store.js";
 
 /* ---------- DOM ----------------------------------------------------- */
 export const $ = (sel, root) => (root || document).querySelector(sel);
@@ -208,64 +211,119 @@ export function mountErrorToasts() {
 }
 
 /* ---------- sign-in ------------------------------------------------ */
-const GOOGLE_G =
-  '<svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">' +
-  '<path fill="#4285F4" d="M45.1 24.5c0-1.6-.1-2.7-.4-3.9H24v7.4h12.1c-.2 2-1.5 5.1-5 7.1l-.1.3 5.4 4.2.4 0c3.5-3.2 5.3-8 5.3-13.1z"/>' +
-  '<path fill="#34A853" d="M24 46c4.8 0 8.8-1.6 11.8-4.3l-5.6-4.4c-1.5 1-3.5 1.8-6.2 1.8-4.7 0-8.7-3.1-10.1-7.4l-.3 0-5.5 4.3-.1.3C10.9 42.1 17 46 24 46z"/>' +
-  '<path fill="#FBBC05" d="M13.9 31.7c-.4-1.2-.6-2.4-.6-3.7s.2-2.5.6-3.7l0-.3-5.7-4.4-.2.1C6.8 22.5 6 25.2 6 28s.8 5.5 2 7.9l5.9-4.2z"/>' +
-  '<path fill="#EA4335" d="M24 10c3.3 0 5.6 1.4 6.9 2.6l5-4.9C32.7 4.9 28.8 3 24 3 17 3 10.9 6.9 8 12.5l5.9 4.6C15.3 13.1 19.3 10 24 10z"/>' +
-  "</svg>";
-
-export function googleButton(label) {
-  return el("button", {
-    class: "btn lg google", onclick: async (e) => {
-      const b = e.currentTarget;
-      b.disabled = true;
-      try { await store.signIn(); }
-      catch (err) { toast(signInHelp(err), "error"); }
-      finally { b.disabled = false; }
-    }
-  }, [el("span", { class: "g", html: GOOGLE_G }), label || "Sign in with Google"]);
-}
-
 function signInHelp(err) {
   const code = (err && err.code) || "";
+  if (/wrong-password|invalid-credential|invalid-login/.test(code)) return "Wrong username or password.";
+  if (/user-not-found/.test(code)) return "No account with that username. Ask your supervisor to create one.";
+  if (/too-many-requests/.test(code)) return "Too many attempts. Wait a minute and try again.";
+  if (/user-disabled/.test(code)) return "That account has been disabled.";
+  if (/network-request-failed/.test(code)) return "No connection to the server.";
+  if (/operation-not-allowed/.test(code)) {
+    return "Email/password sign-in isn't switched on in this Firebase project yet (Authentication → Sign-in method).";
+  }
   if (/unauthorized-domain/.test(code)) {
-    return "This site isn't on Firebase's authorised-domain list yet. Add " + location.hostname +
+    return "This site isn't on Firebase's authorised-domain list. Add " + location.hostname +
       " under Authentication → Settings → Authorized domains.";
   }
-  if (/operation-not-allowed/.test(code)) {
-    return "Google sign-in isn't switched on for this Firebase project yet (Authentication → Sign-in method).";
-  }
-  return "Sign-in failed: " + (code || (err && err.message) || "unknown error");
+  if (/weak-password/.test(code)) return "Password must be at least 6 characters.";
+  if (/email-already-in-use/.test(code)) return "That username is already taken.";
+  return (err && err.message) || code || "Something went wrong.";
+}
+export { signInHelp };
+
+/** Full-page sign-in. Username + password, created by a supervisor. */
+export function signInGate(teamName) {
+  const user = input({ placeholder: "Username", autocapitalize: "none", autocorrect: "off", spellcheck: "false", autocomplete: "username" });
+  const pass = input({ type: "password", placeholder: "Password", autocomplete: "current-password" });
+  const msg = el("p", { class: "small err", style: { minHeight: "18px", margin: "4px 0 0" } });
+  const btn = el("button", { class: "btn lg primary block", text: "Sign in" });
+
+  const go = async () => {
+    const u = user.value.trim();
+    if (!u || !pass.value) { msg.textContent = "Enter your username and password."; return; }
+    btn.disabled = true;
+    msg.textContent = "";
+    try {
+      await store.signIn(u, pass.value);
+    } catch (err) {
+      msg.textContent = signInHelp(err);
+      pass.value = "";
+      pass.focus();
+    } finally { btn.disabled = false; }
+  };
+  btn.addEventListener("click", go);
+  for (const f of [user, pass]) f.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+
+  const card = el("div", { class: "card pad-lg", style: { maxWidth: "400px" } }, [
+    el("div", { class: "center" }, [
+      el("div", { class: "mark big", text: "B" }),
+      el("h2", { text: teamName || "BreakFlow" }),
+      el("p", { class: "muted small", style: { margin: "8px 0 20px" } },
+        ["Sign in to take your breaks. Only you can start or end your own."])
+    ]),
+    el("div", { class: "stack", style: { gap: "10px" } }, [user, pass, btn, msg]),
+    el("p", { class: "small dim center", style: { marginTop: "16px", marginBottom: "0" } },
+      ["Your supervisor creates your username and password."])
+  ]);
+
+  const wrap = el("div", { class: "gate" }, [card]);
+  setTimeout(() => user.focus(), 80);
+
+  /* On a brand-new database, offer to create the owner account. */
+  store.setupDone().then((done) => {
+    if (done) return;
+    card.append(el("p", { class: "small center", style: { marginTop: "14px", marginBottom: "0" } }, [
+      el("a", {
+        href: "#", text: "First time here? Set up this board →",
+        onclick: (e) => { e.preventDefault(); firstAdminDialog(); }
+      })
+    ]));
+  });
+  return wrap;
 }
 
-/** Full-page card shown when nobody is signed in. */
-export function signInGate(teamName) {
-  return el("div", { class: "gate" }, [
-    el("div", { class: "card pad-lg center", style: { maxWidth: "440px" } }, [
-      el("div", { class: "mark big", text: "B" }),
-      el("h2", { text: teamName ? teamName + " breaks" : "BreakFlow" }),
-      el("p", { class: "muted", style: { margin: "8px 0 20px" } },
-        ["Sign in so your breaks are yours. Only you can start or end your own break — not a colleague, not by accident."]),
-      googleButton(),
-      el("p", { class: "small dim", style: { marginTop: "18px" } },
-        ["Use your work Google account. This browser will stay signed in."])
-    ])
+/** One-time owner setup on a fresh database. */
+function firstAdminDialog() {
+  const name = input({ placeholder: "Your full name" });
+  const user = input({ placeholder: "Username, e.g. murad", autocapitalize: "none", spellcheck: "false" });
+  const p1 = input({ type: "password", placeholder: "Password (6+ characters)" });
+  const p2 = input({ type: "password", placeholder: "Repeat password" });
+
+  modal("Set up this board", el("div", { class: "stack" }, [
+    el("p", { class: "muted small" },
+      ["This creates the first supervisor account and claims the board. It can only be done once, so do it yourself before sharing the link."]),
+    field("Your name", name),
+    field("Username", user, "You can use a plain username, or a real email address if you'd like password-reset emails to work."),
+    field("Password", p1),
+    field("Confirm password", p2)
+  ]), [
+    { label: "Cancel", kind: "ghost" },
+    {
+      label: "Create supervisor account", kind: "primary", onClick: async () => {
+        if (!name.value.trim()) { toast("Enter your name.", "error"); return false; }
+        if (!user.value.trim()) { toast("Choose a username.", "error"); return false; }
+        if (p1.value.length < 6) { toast("Password must be at least 6 characters.", "error"); return false; }
+        if (p1.value !== p2.value) { toast("Passwords don't match.", "error"); return false; }
+        try {
+          await store.createFirstAdmin(user.value.trim(), name.value.trim(), p1.value);
+          toast("Welcome. You're the supervisor for this board.", "ok");
+        } catch (err) { toast(signInHelp(err), "error"); return false; }
+      }
+    }
   ]);
 }
 
-/** Shown when signed in but the roster is locked and they aren't on it. */
-export function notOnRosterGate(user) {
+/** Signed in to Firebase, but no roster record - shouldn't normally happen. */
+export function noAccountGate(user) {
   return el("div", { class: "gate" }, [
     el("div", { class: "card pad-lg center", style: { maxWidth: "460px" } }, [
-      el("h2", { text: "You're not on the roster yet" }),
+      el("h2", { text: "This account isn't set up" }),
       el("p", { class: "muted", style: { margin: "10px 0 6px" } }, [
-        "You're signed in as ", el("b", { text: (user && user.email) || "this account" }),
-        ", but a supervisor hasn't added you to this team."
+        "You signed in as ", el("b", { text: displayLogin((user && user.email) || "") || "this account" }),
+        ", but there's no agent profile attached to it."
       ]),
       el("p", { class: "small dim", style: { marginBottom: "18px" } },
-        ["Ask your supervisor to open the roster for a moment so you can join, or to check you signed in with the right account."]),
+        ["Ask your supervisor to create your account, then sign in with the username and password they give you."]),
       el("div", { class: "btn-row", style: { justifyContent: "center" } }, [
         el("button", { class: "btn", text: "Try again", onclick: () => location.reload() }),
         el("button", { class: "btn ghost", text: "Sign out", onclick: () => store.signOut().then(() => location.reload()) })
@@ -308,6 +366,29 @@ export function identityChip(host, opts) {
   }
 }
 
+export function changePasswordDialog() {
+  const cur = input({ type: "password", placeholder: "Current password", autocomplete: "current-password" });
+  const p1 = input({ type: "password", placeholder: "New password (6+ characters)", autocomplete: "new-password" });
+  const p2 = input({ type: "password", placeholder: "Repeat new password", autocomplete: "new-password" });
+  modal("Change your password", el("div", { class: "stack" }, [
+    el("p", { class: "muted small" }, ["You need your current password. If you've forgotten it, a supervisor has to make you a new account."]),
+    field("Current password", cur),
+    field("New password", p1),
+    field("Confirm", p2)
+  ]), [
+    { label: "Cancel", kind: "ghost" },
+    {
+      label: "Change password", kind: "primary", onClick: async () => {
+        if (p1.value.length < 6) { toast("Password must be at least 6 characters.", "error"); return false; }
+        if (p1.value !== p2.value) { toast("New passwords don't match.", "error"); return false; }
+        try { await store.changeMyPassword(cur.value, p1.value); }
+        catch (err) { toast(signInHelp(err), "error"); return false; }
+        toast("Password changed", "ok");
+      }
+    }
+  ]);
+}
+
 /** No database configured yet - don't pretend the app is working. */
 export function notConfiguredGate() {
   return el("div", { class: "gate" }, [
@@ -347,13 +428,16 @@ function accountDialog(opts) {
   modal("Your account", el("div", { class: "stack" }, [
     el("p", { class: "small muted" }, [
       local ? "Local demo - no sign-in." : "Signed in as ",
-      local ? null : el("b", { text: u.email || u.uid })
+      local ? null : el("b", { text: displayLogin(u.email) || u.uid })
     ]),
     field("Display name", nm, "How your name appears on the board"),
     field("Team", tm),
     isAdminAgent(store.state, m) ? el("p", { class: "small" }, [
       el("span", { class: "badge cy", text: "admin" }), " You can open the supervisor panel."
-    ]) : null
+    ]) : null,
+    local ? null : el("div", {}, [
+      el("button", { class: "btn sm", text: "Change my password", onclick: () => changePasswordDialog() })
+    ])
   ]), [
     local ? null : { label: "Sign out", kind: "ghost", onClick: async () => { await store.signOut(); location.reload(); } },
     { label: "Cancel", kind: "ghost" },
@@ -403,7 +487,7 @@ export function setupDialog() {
       el("ol", { class: "small" }, [
         el("li", { html: "Go to <b>console.firebase.google.com</b> and create a free project." }),
         el("li", { html: "Build &rarr; <b>Realtime Database</b> &rarr; Create database &rarr; start in <b>test mode</b>." }),
-        el("li", { html: "Build &rarr; <b>Authentication</b> &rarr; Get started &rarr; Sign-in method &rarr; <b>Google</b> &rarr; Enable." }),
+        el("li", { html: "Build &rarr; <b>Authentication</b> &rarr; Get started &rarr; Sign-in method &rarr; <b>Email/Password</b> &rarr; Enable." }),
         el("li", { html: "Authentication &rarr; Settings &rarr; <b>Authorized domains</b> &rarr; Add <code>" + esc(location.hostname) + "</code>." }),
         el("li", { html: "Project settings &rarr; Your apps &rarr; <b>Web</b> &rarr; register app &rarr; copy the <code>firebaseConfig</code> object." }),
         el("li", { html: "Paste it here and save." }),

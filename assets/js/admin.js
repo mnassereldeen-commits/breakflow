@@ -11,14 +11,14 @@ import {
   sortedTypes, sortedAgents, supervisors, occupancy, queueFor, listSessions,
   onBreakNow, endBreak, denyQueued, approveQueued, forceStart, adjustTime,
   startForAgent, dayKey, isOver, isPresent, encodeConfig, activeConfig,
-  isAdminAgent, adminEmails, emailKey
+  isAdminAgent, adminEmails, emailKey, displayLogin, isSyntheticEmail, loginEmail
 } from "./store.js";
 
 import {
   $, el, mmss, hhmm, human, toast, modal, confirmBox, field, input, select,
   mountStatusPill, mountClock, setFavicon, initials, hueFrom,
   csv, download, setupDialog, beep, notify, askNotify, mountErrorToasts,
-  signInGate, notOnRosterGate, identityChip, notConfiguredGate, demoBanner
+  signInGate, noAccountGate, identityChip, notConfiguredGate, demoBanner, signInHelp
 } from "./common.js";
 
 let tab = location.hash.replace("#", "") || "live";
@@ -79,7 +79,7 @@ function render() {
   }
   if (store.mode === "unconfigured") { main.append(notConfiguredGate()); return; }
   if (store.access === "signed-out") { main.append(signInGate(state.settings.teamName)); return; }
-  if (store.access === "not-on-roster") { main.append(notOnRosterGate(store.user)); return; }
+  if (store.access === "no-account") { main.append(noAccountGate(store.user)); return; }
   if (store.access !== "ok" || !store.member) {
     main.append(el("div", { class: "card center", style: { padding: "48px" } }, [el("p", { class: "muted", text: "Loading…" })]));
     return;
@@ -105,8 +105,7 @@ function render() {
   main.append(nav);
 
   if (store.mode === "local") main.append(demoBanner());
-  /* the Roster tab has a fuller version of this, so do not say it twice */
-  if (state.settings.allowSelfEnroll !== false && tab !== "roster") main.append(openRosterBanner());
+
 
   const body = el("div", { class: "stack" });
   const now = store.now();
@@ -125,33 +124,14 @@ function notSupervisor() {
     el("div", { class: "card pad-lg center", style: { maxWidth: "440px" } }, [
       el("h2", { text: "Supervisors only" }),
       el("p", { class: "muted", style: { margin: "10px 0 18px" } }, [
-        "You're signed in as ", el("b", { text: store.user.email || store.member.name }),
-        ", which isn't on the admin list. An existing admin can add your email under Roster & access."
+        "You're signed in as ", el("b", { text: displayLogin(store.user.email) || store.member.name }),
+        ", which is an agent account. A supervisor can add you to the admin list under Roster & access."
       ]),
       el("div", { class: "btn-row", style: { justifyContent: "center" } }, [
         el("a", { class: "btn primary", href: "index.html", text: "← Back to my breaks" })
       ])
     ])
   ]);
-}
-
-function openRosterBanner() {
-  return el("div", { class: "callout", style: { marginBottom: "16px" } }, [
-    el("div", { class: "row wrap" }, [
-      el("span", {}, ["⚠ The roster is open — anyone who opens the link with a Google account can join this board. Lock it once your team has signed in."]),
-      el("div", { class: "spacer" }),
-      el("button", { class: "btn sm", text: "Lock the roster", onclick: lockRoster })
-    ])
-  ]);
-}
-
-async function lockRoster() {
-  const n = sortedAgents(store.state).length;
-  if (!(await confirmBox("Lock the roster?",
-    "The " + n + " people already signed in keep working normally. Anyone new who opens the link will be told to ask a supervisor. You can reopen it any time.",
-    "Lock it"))) return;
-  await store.update({ "settings/allowSelfEnroll": false }, "lock the roster");
-  toast("Roster locked — only these " + n + " people can get in", "ok");
 }
 
 /* ---------- concurrency controls ---------- */
@@ -535,7 +515,6 @@ function rosterTab(state, now) {
   const agents = sortedAgents(state);
   const admins = supervisors(state);
   const today = dayKey(now);
-  const open = state.settings.allowSelfEnroll !== false;
   const rows = el("tbody");
 
   for (const a of agents) {
@@ -551,7 +530,7 @@ function rosterTab(state, now) {
         el("span", { class: "av", style: { "--h": hueFrom(a.name) }, text: initials(a.name) }),
         el("div", {}, [
           el("b", { text: a.name + (isSelf ? " (you)" : "") }),
-          el("div", { class: "tiny", style: { textTransform: "none", letterSpacing: "0" }, text: a.email || "" })
+          el("div", { class: "tiny", style: { textTransform: "none", letterSpacing: "0" }, text: displayLogin(a) })
         ])
       ])]),
       el("td", { class: "muted", text: a.team || "—" }),
@@ -570,11 +549,21 @@ function rosterTab(state, now) {
       el("td", { class: "num", text: human(used) }),
       el("td", {}, [el("div", { class: "btn-row" }, [
         el("button", { class: "btn sm", text: "Edit", onclick: () => editAgent(a) }),
+        !isSyntheticEmail(a.email) ? el("button", {
+          class: "btn sm", text: "Reset email",
+          title: "Email this person a password reset link",
+          onclick: async () => {
+            if (!(await confirmBox("Send a reset link to " + a.email + "?",
+              "Firebase emails them a link to choose a new password. You never see it.", "Send"))) return;
+            try { await store.sendResetEmail(a.email); toast("Reset link sent to " + a.email, "ok"); }
+            catch (e) { toast(signInHelp(e), "error"); }
+          }
+        }) : null,
         el("button", {
           class: "btn sm danger", text: "Remove", onclick: async () => {
             if (admin && admins.length <= 1) { toast("Take their email off the admin list first.", "error"); return; }
             if (await confirmBox("Remove " + a.name + "?",
-              "Their break history stays in reports. If the roster is open they could sign in again and re-join.", "Remove")) {
+              "Their break history stays in reports, and they can no longer see or do anything. The login itself keeps existing in Firebase Authentication — delete it there too if you want the username freed up.", "Remove")) {
               await store.update({ ["agents/" + a.uid]: null }, "remove someone");
               toast("Removed", "info");
             }
@@ -587,60 +576,123 @@ function rosterTab(state, now) {
   const link = location.origin + location.pathname.replace(/admin\.html$/, "index.html");
 
   return el("div", { class: "stack" }, [
-    adminsCard(state),
-    el("div", { class: "card" }, [
-      el("div", { class: "card-head" }, [el("h2", { text: "Who can get in" })]),
-      el("div", { class: "access-state " + (open ? "open" : "locked") }, [
-        el("div", { style: { flex: "1", minWidth: "220px" } }, [
-          el("b", { text: open ? "Roster is OPEN" : "Roster is LOCKED" }),
-          el("div", { class: "small muted" }, [
-            open
-              ? "Anyone who opens the link and signs in with Google joins automatically as an agent."
-              : "Only the " + agents.length + " people below can sign in. Everyone else is turned away."
-          ])
-        ]),
-        open
-          ? el("button", { class: "btn primary", text: "🔒 Lock the roster", onclick: lockRoster })
-          : el("button", {
-            class: "btn", text: "Open for new joiners", onclick: async () => {
-              if (await confirmBox("Open the roster?", "Anyone with the link and a Google account can join while it's open. Remember to lock it again.", "Open it")) {
-                await store.update({ "settings/allowSelfEnroll": true }, "open the roster");
-                toast("Roster open — lock it again when everyone's in", "info");
-              }
-            }
-          })
-      ]),
-      el("div", { class: "stack", style: { marginTop: "14px" } }, [
-        el("p", { class: "small muted", style: { margin: "0" } },
-          ["To add someone: send them the link, they sign in with their work Google account, and they appear here. You can't pre-create an account for them — the identity has to come from Google."]),
-        el("div", { class: "row wrap" }, [
-          el("code", { class: "linkbox", text: link }),
-          el("button", {
-            class: "btn sm", text: "Copy link", onclick: async () => {
-              try { await navigator.clipboard.writeText(link); toast("Link copied", "ok"); }
-              catch (e) { prompt("Copy this link:", link); }
-            }
-          })
-        ])
-      ])
-    ]),
-
     el("div", { class: "card" }, [
       el("div", { class: "card-head" }, [
         el("h2", { text: "Roster" }),
-        el("span", { class: "tiny", text: agents.length + " people · " + admins.length + " admin" + (admins.length === 1 ? "" : "s") })
+        el("span", { class: "tiny", text: agents.length + " people · " + admins.length + " admin" + (admins.length === 1 ? "" : "s") }),
+        el("button", { class: "btn sm", text: "＋ Add supervisor", onclick: () => newAccount(state, true) }),
+        el("button", { class: "btn sm primary", text: "＋ Add agent", onclick: () => newAccount(state, false) })
+      ]),
+      el("p", { class: "muted small", style: { marginTop: "-4px" } }, [
+        "You create the accounts. Give each person their username and password, and send them ",
+        el("a", { href: link, text: "the link" }), ". Nobody can sign up on their own."
       ]),
       agents.length ? el("div", { class: "tbl-wrap" }, [
         el("table", { class: "tbl" }, [
           el("thead", {}, [el("tr", {}, [
-            el("th", { text: "Name" }), el("th", { text: "Team" }), el("th", { text: "Role" }), el("th", { text: "Status" }),
+            el("th", { text: "Name / username" }), el("th", { text: "Team" }), el("th", { text: "Role" }), el("th", { text: "Status" }),
             el("th", { class: "num", text: "Breaks today" }), el("th", { class: "num", text: "Time out" }), el("th", { text: "" })
           ])]),
           rows
         ])
-      ]) : el("p", { class: "empty", text: "Nobody has signed in yet. Share the link above." })
+      ]) : el("p", { class: "empty", text: "No accounts yet. Use “Add agent” to create the first one." })
+    ]),
+
+    adminsCard(state),
+
+    el("div", { class: "card" }, [
+      el("div", { class: "card-head" }, [el("h2", { text: "Forgotten passwords" })]),
+      el("p", { class: "muted small" }, [
+        "An agent can change their own password from their account menu, as long as they still know the current one."
+      ]),
+      el("p", { class: "muted small" }, [
+        "If they've genuinely forgotten it, there's no way for you to set a new one from here — that needs a paid Firebase backend. Two ways out: create them a fresh account (say ",
+        el("code", { text: "sara2" }), ") and remove the old row, or reset it yourself in the ",
+        el("b", { text: "Firebase console → Authentication → Users" }), " list, which has a “Reset password” option on every account."
+      ]),
+      el("p", { class: "muted small", style: { marginBottom: "0" } }, [
+        "To avoid this entirely, create accounts with real email addresses instead of usernames — then a ",
+        el("b", { text: "Reset email" }), " button appears on their row and Firebase mails them a link."
+      ])
     ])
   ]);
+}
+
+/** Create a login for someone. Passwords are set here and handed over in person. */
+function newAccount(state, asAdmin) {
+  const name = input({ placeholder: "Full name" });
+  const user = input({ placeholder: "username  (or a real email address)", autocapitalize: "none", spellcheck: "false" });
+  const team = input({ placeholder: "Team / shift (optional)" });
+  const pass = input({ type: "text", value: suggestPassword(), autocomplete: "off" });
+  const hint = el("p", { class: "small dim", style: { margin: "0" } });
+
+  const sync = () => {
+    const u = user.value.trim().toLowerCase();
+    hint.textContent = u
+      ? (u.includes("@")
+        ? "Real address — they'll be able to get password-reset emails."
+        : "They sign in with just “" + u + "”. No email, so no reset links.")
+      : "";
+  };
+  user.addEventListener("input", sync);
+
+  modal(asAdmin ? "Add a supervisor" : "Add an agent", el("div", { class: "stack" }, [
+    field("Full name", name),
+    field("Username", user),
+    hint,
+    field("Team", team),
+    field("Password", pass, "Write this down and give it to them — it isn't shown again. They can change it themselves later."),
+    el("div", {}, [el("button", { class: "btn sm", text: "🎲 New password", onclick: () => { pass.value = suggestPassword(); } })]),
+    asAdmin ? el("div", { class: "callout cy" }, ["This account gets the supervisor panel and can create other accounts."]) : null
+  ]), [
+    { label: "Cancel", kind: "ghost" },
+    {
+      label: asAdmin ? "Create supervisor" : "Create agent", kind: "primary", onClick: async () => {
+        if (!name.value.trim()) { toast("Enter their name.", "error"); return false; }
+        if (!user.value.trim()) { toast("Choose a username.", "error"); return false; }
+        if (pass.value.length < 6) { toast("Password must be at least 6 characters.", "error"); return false; }
+        let res;
+        try {
+          res = await store.createAccount({
+            username: user.value.trim(),
+            name: name.value.trim(),
+            team: team.value.trim(),
+            password: pass.value,
+            makeAdmin: !!asAdmin
+          });
+        } catch (e) { toast(signInHelp(e), "error"); return false; }
+        credentialsDialog(name.value.trim(), displayLogin(res.email), pass.value);
+      }
+    }
+  ]);
+  setTimeout(sync, 0);
+}
+
+function suggestPassword() {
+  const words = ["tiger", "amber", "river", "cobalt", "maple", "falcon", "cedar", "onyx", "harbor", "quartz"];
+  const w = words[Math.floor(Math.random() * words.length)];
+  return w + "-" + String(Math.floor(Math.random() * 9000) + 1000);
+}
+
+/** Shown once, right after creating an account. */
+function credentialsDialog(name, username, password) {
+  const text = "BreakFlow login for " + name + "\nUsername: " + username + "\nPassword: " + password + "\n" +
+    location.origin + location.pathname.replace(/admin\.html$/, "index.html");
+  modal("Account created", el("div", { class: "stack" }, [
+    el("p", { class: "muted small" }, ["Give these to " + name + " now. The password isn't stored anywhere you can read it back."]),
+    el("div", { class: "creds" }, [
+      el("div", {}, [el("span", { class: "tiny", text: "Username" }), el("b", { text: username })]),
+      el("div", {}, [el("span", { class: "tiny", text: "Password" }), el("b", { text: password })])
+    ]),
+    el("div", { class: "btn-row" }, [
+      el("button", {
+        class: "btn sm", text: "Copy all", onclick: async () => {
+          try { await navigator.clipboard.writeText(text); toast("Copied", "ok"); }
+          catch (e) { prompt("Copy this:", text); }
+        }
+      })
+    ])
+  ]), [{ label: "Done", kind: "primary" }]);
 }
 
 /** The admin list, by email. This is the whole authorisation story. */
@@ -655,8 +707,8 @@ function adminsCard(state) {
     box.append(el("div", { class: "conc-row", style: { "--c": "#22d3ee" } }, [
       el("span", { class: "ico", text: "⚙" }),
       el("div", { class: "who" }, [
-        el("b", { text: email + (isMe ? "  (you)" : "") }),
-        el("span", { text: known ? "signed in as " + known.name : "hasn't signed in yet" })
+        el("b", { text: displayLogin(email) + (isMe ? "  (you)" : "") }),
+        el("span", { text: known ? known.name : "no account with this login yet" })
       ]),
       el("button", {
         class: "btn sm danger", text: "Remove",
@@ -674,30 +726,30 @@ function adminsCard(state) {
     ]));
   }
 
-  const inp = input({ type: "email", placeholder: "colleague@company.com", autocomplete: "off" });
+  const inp = input({ placeholder: "username of an existing account", autocapitalize: "none", spellcheck: "false", autocomplete: "off" });
   const add = async () => {
-    const email = inp.value.trim().toLowerCase();
-    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { toast("That doesn't look like an email address.", "error"); return; }
+    const email = loginEmail(inp.value.trim());
+    if (!email) { toast("Type a username.", "error"); return; }
     if (emails.includes(email)) { toast("Already an admin.", "info"); return; }
     try { await store.update({ ["admins/" + emailKey(email)]: true }, "change the admin list"); }
     catch (e) { return; }
     inp.value = "";
-    toast(email + " is now an admin", "ok");
+    toast(displayLogin(email) + " is now an admin", "ok");
   };
   inp.addEventListener("keydown", (e) => { if (e.key === "Enter") add(); });
 
   return el("div", { class: "card" }, [
     el("div", { class: "card-head" }, [
-      el("h2", { text: "Admins" }),
-      el("span", { class: "tiny", text: emails.length + " " + (emails.length === 1 ? "address" : "addresses") })
+      el("h2", { text: "Who is an admin" }),
+      el("span", { class: "tiny", text: emails.length + " " + (emails.length === 1 ? "login" : "logins") })
     ]),
     el("p", { class: "muted small", style: { marginTop: "-4px" } }, [
-      "Admin is decided by email address, so nothing an agent does to their own account can promote them. Add an address before or after that person signs in — either way works, and a listed admin can always get in even when the roster is locked."
+      "Admin is decided by login name, held here and checked by the database itself — so nothing an agent does to their own account can promote them. Use this to promote or demote an existing account; “Add supervisor” above creates a brand-new one."
     ]),
     box,
     el("div", { class: "row wrap", style: { marginTop: "12px" } }, [
       el("div", { style: { flex: "1", minWidth: "220px" } }, [inp]),
-      el("button", { class: "btn primary", text: "＋ Add admin", onclick: add })
+      el("button", { class: "btn primary", text: "Make admin", onclick: add })
     ])
   ]);
 }

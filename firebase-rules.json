@@ -4,34 +4,38 @@
 // The console accepts these // comments.
 //
 // The short version:
-//   * You must be signed in with Google to see anything.
-//   * Once the roster is locked, only people on the roster can see anything.
+//   * Accounts are created by a supervisor. Nobody can sign themselves
+//     up: an account with no agent record can't read or write anything.
 //   * You may create and change YOUR OWN break, and nobody else's.
 //   * You cannot delete or rewrite a break that has already closed,
 //     so an overstay can't be erased after the fact.
-//   * Admins are decided by EMAIL, in /breakflow/admins. There is no
-//     way for an agent to promote themselves - nothing in their own
+//   * Admins are decided by login name, in /breakflow/admins. There is
+//     no way for an agent to promote themselves - nothing in their own
 //     record grants anything.
 //   * Admins can do all of it.
 //
-// The admin list is { "email,with,dots,as,commas": true }. The first
-// person to sign in claims the board by adding their own email; after
-// that only an existing admin can change the list.
-//
-// Optional extra lock: to accept only company Google accounts, add
-//     && auth.token.email.endsWith('@your-company.com')
-// to the ".read" line and to each ".write" line below.
+// The admin list is { "login,with,dots,as,commas": true }. The first
+// account created claims the board; after that only an existing admin
+// can change the list.
 
 {
   "rules": {
     "breakflow": {
 
-      // Roster members and listed admins always. Anyone signed in while
-      // the roster is still open, so the team can enrol during onboarding.
-      ".read": "auth != null && (root.child('breakflow/agents').child(auth.uid).exists() || root.child('breakflow/admins').child(auth.token.email.lower().replace('.', ',')).val() == true || root.child('breakflow/settings/allowSelfEnroll').val() != false)",
+      // Only people with an agent record, plus listed admins. An
+      // account created straight against Firebase Auth gets nothing.
+      ".read": "auth != null && (root.child('breakflow/agents').child(auth.uid).exists() || root.child('breakflow/admins').child(auth.token.email.lower().replace('.', ',')).val() == true)",
+
+      // Public: lets the sign-in page know whether to offer first-run
+      // setup. One boolean, nothing else is readable without an account.
+      "setupDone": {
+        ".read": true,
+        ".write": "root.child('breakflow/admins').child(auth.token.email.lower().replace('.', ',')).val() == true || !root.child('breakflow/admins').exists()",
+        ".validate": "newData.isBoolean()"
+      },
 
       // WHO IS AN ADMIN. Writable by an existing admin, or by the very
-      // first person to sign in while the list is still empty.
+      // first account while the list is still empty.
       "admins": {
         ".write": "root.child('breakflow/admins').child(auth.token.email.lower().replace('.', ',')).val() == true || !root.child('breakflow/admins').exists()",
         "$emailKey": { ".validate": "newData.isBoolean()" }
@@ -49,10 +53,10 @@
 
       "agents": {
         "$uid": {
-          // Edit your own record; admins edit anyone. Joining needs the
-          // roster to be open - unless your email is on the admin list,
-          // so adding an admin then locking can't shut them out.
-          ".write": "root.child('breakflow/admins').child(auth.token.email.lower().replace('.', ',')).val() == true || ($uid == auth.uid && (data.exists() || root.child('breakflow/settings/allowSelfEnroll').val() != false))",
+          // Admins create and edit anyone. You may edit your OWN record
+          // but not create it - so nobody can enrol themselves. The one
+          // exception is the very first account, which claims the board.
+          ".write": "root.child('breakflow/admins').child(auth.token.email.lower().replace('.', ',')).val() == true || ($uid == auth.uid && data.exists()) || ($uid == auth.uid && !root.child('breakflow/admins').exists())",
 
           "uid": { ".validate": "newData.val() == $uid" },
           "name": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 80" },

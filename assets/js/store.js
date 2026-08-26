@@ -1,16 +1,37 @@
 /* ============================================================
    BreakFlow - identity, data layer and queue engine
 
-   Identity comes from Firebase Auth (Google). The database rules are
-   the real gate: you may only write your OWN break, admins may write
-   anyone's. Nothing here is trusted to be the only check.
+   Agents sign in with a username and password that an admin created
+   for them. The database rules are the real gate: you may only write
+   your OWN break, admins may write anyone's.
 
    Two backends behind one API:
-     firebase : shared live state, Google sign-in, rules enforced
+     firebase : shared live state, real sign-in, rules enforced
      local    : localStorage demo, no sign-in, one browser only
    ============================================================ */
 
-import { FIREBASE_CONFIG, DB_ROOT, DEFAULTS } from "./config.js";
+import { FIREBASE_CONFIG, DB_ROOT, DEFAULTS, LOGIN_DOMAIN } from "./config.js";
+
+/* ------------------------------------------------------------------
+   Usernames. Firebase Auth only speaks email, so a bare username is
+   mapped onto a synthetic address. Anything with an "@" is a real
+   address and passes through untouched (so reset emails can work).
+   ------------------------------------------------------------------ */
+export function loginEmail(username) {
+  const u = String(username || "").trim().toLowerCase();
+  if (!u) return "";
+  return u.includes("@") ? u : u + "@" + LOGIN_DOMAIN;
+}
+export function isSyntheticEmail(email) {
+  return String(email || "").toLowerCase().endsWith("@" + LOGIN_DOMAIN);
+}
+/** What to show a human: the username, or the real address. */
+export function displayLogin(emailOrAgent) {
+  const email = typeof emailOrAgent === "string"
+    ? emailOrAgent
+    : (emailOrAgent && emailOrAgent.email) || "";
+  return isSyntheticEmail(email) ? email.split("@")[0] : email;
+}
 
 const SDK = "https://www.gstatic.com/firebasejs/10.12.2";
 const LS_CFG = "breakflow.fbconfig";
@@ -106,7 +127,6 @@ function withDefaults(s) {
       teamName: DEFAULTS.teamName,
       globalMaxConcurrent: DEFAULTS.globalMaxConcurrent,
       graceMinutes: DEFAULTS.graceMinutes,
-      allowSelfEnroll: true,
       hasAdmin: false
     }, st.settings || {}),
     admins: st.admins || {},
@@ -130,7 +150,7 @@ class Store {
     /* auth */
     this.user = null;              // { uid, email, name, photo }  (null = signed out)
     this.member = null;            // roster record for this.user, once resolved
-    this.access = "unknown";       // unknown | signed-out | ok | not-on-roster | error
+    this.access = "unknown";       // unknown | signed-out | ok | no-account | error
 
     this._changes = bus();
     this._status = bus();
@@ -244,14 +264,14 @@ class Store {
         this.state = withDefaults(snap.val());
         this._subscribed = true;
         this.member = (this.state.agents || {})[this.user.uid] || null;
-        if (this.access !== "not-on-roster") this.access = this.member ? "ok" : this.access;
+        if (this.access !== "no-account") this.access = this.member ? "ok" : this.access;
         this._pushStatus();
         this._emit();
         if (!settled) { settled = true; resolve(); }
       }, (err) => {
         /* rules refused the read: not a member and the roster is locked */
         this._subscribed = false;
-        this.access = /permission/i.test(err.message || "") ? "not-on-roster" : "error";
+        this.access = /permission/i.test(err.message || "") ? "no-account" : "error";
         this.lastError = err;
         this._pushStatus();
         if (!settled) { settled = true; resolve(); }
@@ -266,54 +286,51 @@ class Store {
     this.touch();
   }
 
-  /** Create this user's roster record if they're allowed in, else block them. */
+  /**
+   * Find this user's roster record. Nobody self-enrols: accounts are
+   * created by an admin, which writes the record at the same time.
+   * The single exception is the very first account on a fresh board.
+   */
   async _ensureMembership() {
     const uid = this.user.uid;
     const email = this.user.email || "";
 
-    /* The very first sign-in claims the board by putting its own email
-       in /admins. After that the list can only be changed by an admin. */
-    const bootstrap = !Object.keys(this.state.admins || {}).length;
-
     if (this.state.agents[uid]) {
       this.member = this.state.agents[uid];
       this.access = "ok";
-      if (bootstrap && email) {
-        try { await this.update({ ["admins/" + emailKey(email)]: true }, "claim the board"); } catch (e) { /* ignore */ }
-      }
       this._pushStatus();
       return;
     }
 
-    const open = this.state.settings.allowSelfEnroll !== false;
-    const listedAdmin = isAdminEmail(this.state, email);
-    /* A listed admin can always get in, even with the roster locked -
-       otherwise adding a second admin then locking would shut them out. */
-    if (!bootstrap && !open && !listedAdmin) {
-      this.access = "not-on-roster";
+    /* Fresh database: this account claims it as the owner. */
+    const bootstrap = !Object.keys(this.state.admins || {}).length;
+    if (!bootstrap) {
+      this.access = "no-account";
       this._pushStatus();
       return;
     }
 
     const rec = {
       uid: uid,
-      name: this.user.name || "New agent",
+      name: (this._pendingProfile && this._pendingProfile.name) || displayLogin(email) || "Owner",
       email: email,
-      photo: this.user.photo || "",
       team: "",
       createdAt: Date.now(),
       lastSeen: Date.now()
     };
-    const patch = { ["agents/" + uid]: rec };
-    if (bootstrap && email) patch["admins/" + emailKey(email)] = true;
     try {
-      await this.update(patch, "join the roster");
+      await this.update({
+        ["agents/" + uid]: rec,
+        ["admins/" + emailKey(email)]: true,
+        setupDone: true
+      }, "set up the board");
       this.member = rec;
       this.access = "ok";
-      this.bootstrapped = bootstrap;
+      this.bootstrapped = true;
     } catch (e) {
-      this.access = "not-on-roster";
+      this.access = "no-account";
     }
+    this._pendingProfile = null;
     this._pushStatus();
   }
 
@@ -342,23 +359,94 @@ class Store {
     catch (e) { /* not fatal */ }
   }
 
-  async signIn() {
+  /* ---------------- sign in / out ---------------- */
+  async signIn(username, password) {
     if (this.mode === "local") return;
     const { auth, am } = this._fb;
-    const provider = new am.GoogleAuthProvider();
-    provider.setCustomParameters({ prompt: "select_account" });
+    await am.signInWithEmailAndPassword(auth, loginEmail(username), password);
+  }
+
+  /** Has anyone claimed this board yet? Readable before signing in. */
+  async setupDone() {
+    if (this.mode !== "firebase") return true;
+    const { db, m } = this._fb;
     try {
-      await am.signInWithPopup(auth, provider);
+      const snap = await m.get(m.ref(db, DB_ROOT + "/setupDone"));
+      return snap.exists() && snap.val() === true;
     } catch (e) {
-      if (/popup-blocked|popup-closed|cancelled-popup|operation-not-supported/i.test(e.code || "")) {
-        if (/popup-blocked|operation-not-supported/i.test(e.code || "")) {
-          return am.signInWithRedirect(auth, provider);
-        }
-        return; /* user closed the popup */
-      }
-      this._fail(e, "sign-in");
-      throw e;
+      /* can't tell - assume set up, so we never show setup to an agent */
+      return true;
     }
+  }
+
+  /** One-time: create the owner account on a fresh database. */
+  async createFirstAdmin(username, name, password) {
+    const { auth, am } = this._fb;
+    if (await this.setupDone()) throw new Error("This board has already been set up.");
+    this._pendingProfile = { name: name };
+    await am.createUserWithEmailAndPassword(auth, loginEmail(username), password);
+  }
+
+  /**
+   * Admin creates an account for someone else.
+   *
+   * The client SDK's createUser signs you in as the new user, which
+   * would kick the admin out of their own session. Doing it on a
+   * second app instance keeps auth state separate, so the admin stays
+   * exactly where they were.
+   */
+  async createAccount(opts) {
+    if (this.mode !== "firebase") throw new Error("Connect a Firebase database first — the local demo has no accounts.");
+    if (!this.isAdmin()) throw new Error("Admins only.");
+    const email = loginEmail(opts.username);
+    if (!email) throw new Error("A username is required.");
+    if (sortedAgents(this.state).some((a) => (a.email || "").toLowerCase() === email)) {
+      throw new Error("That username is already taken.");
+    }
+    const [appMod, authMod] = await Promise.all([
+      import(SDK + "/firebase-app.js"),
+      import(SDK + "/firebase-auth.js")
+    ]);
+    const alias = "provision-" + Date.now().toString(36);
+    const secondary = appMod.initializeApp(this._fb.app.options, alias);
+    const auth2 = authMod.getAuth(secondary);
+    try {
+      const cred = await authMod.createUserWithEmailAndPassword(auth2, email, opts.password);
+      const uid = cred.user.uid;
+      const patch = {
+        ["agents/" + uid]: {
+          uid: uid,
+          name: opts.name || displayLogin(email),
+          email: email,
+          team: opts.team || "",
+          createdAt: Date.now(),
+          lastSeen: 0
+        }
+      };
+      if (opts.makeAdmin) patch["admins/" + emailKey(email)] = true;
+      await this.update(patch, "create the account");
+      return { uid: uid, email: email };
+    } finally {
+      try { await authMod.signOut(auth2); } catch (e) { /* ignore */ }
+      try { await appMod.deleteApp(secondary); } catch (e) { /* ignore */ }
+    }
+  }
+
+  /** Change your own password (you must know the current one). */
+  async changeMyPassword(current, next) {
+    const { auth, am } = this._fb;
+    const u = auth.currentUser;
+    if (!u) throw new Error("Not signed in.");
+    const cred = am.EmailAuthProvider.credential(u.email, current);
+    await am.reauthenticateWithCredential(u, cred);
+    await am.updatePassword(u, next);
+  }
+
+  /** Only possible for real email addresses, not synthetic usernames. */
+  async sendResetEmail(email) {
+    if (isSyntheticEmail(email)) throw new Error("That account uses a username, not an email address, so there is nowhere to send a reset link.");
+    const { auth, am } = this._fb;
+    await am.sendPasswordResetEmail(auth, email);
   }
 
   async signOut() {
@@ -378,19 +466,19 @@ class Store {
   async _connectLocal() {
     this.mode = "local";
     this.online = true;
-    this.user = { uid: "local-user", email: "you@local.demo", name: "You (local demo)", photo: "" };
+    this.user = { uid: "local-user", email: "you@breakflow.local", name: "You (local demo)", photo: "" };
     const load = () => {
       let raw = null;
       try { raw = JSON.parse(localStorage.getItem(LS_DATA) || "null"); } catch (e) { /* ignore */ }
       const demoUser = {
-        uid: "local-user", name: "You (local demo)", email: "you@local.demo",
+        uid: "local-user", name: "You (local demo)", email: "you@breakflow.local",
         team: "", createdAt: Date.now(), lastSeen: Date.now()
       };
       if (!raw || !raw.breakTypes || !Object.keys(raw.breakTypes).length) {
         raw = {
           settings: {
             teamName: DEFAULTS.teamName, globalMaxConcurrent: DEFAULTS.globalMaxConcurrent,
-            graceMinutes: DEFAULTS.graceMinutes, allowSelfEnroll: true, hasAdmin: true
+            graceMinutes: DEFAULTS.graceMinutes, hasAdmin: true
           },
           admins: { [emailKey(demoUser.email)]: true },
           breakTypes: DEFAULTS.breakTypes,
