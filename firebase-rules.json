@@ -1,0 +1,28 @@
+{
+  "rules": {
+    "breakflow": {
+      ".read": "auth != null",
+      ".write": "auth != null",
+
+      "settings": { ".write": "auth != null" },
+      "breakTypes": { ".write": "auth != null" },
+
+      "agents": {
+        "$aid": {
+          "name": { ".validate": "newData.isString() && newData.val().length <= 80" },
+          "team": { ".validate": "newData.isString() && newData.val().length <= 60" }
+        }
+      },
+
+      "sessions": {
+        "$sid": {
+          "state": { ".validate": "newData.val().matches(/^(queued|active|over|done|cancelled|denied)$/)" },
+          "agentName": { ".validate": "newData.isString() && newData.val().length <= 80" },
+          "minutes": { ".validate": "newData.isNumber() && newData.val() > 0 && newData.val() <= 60" }
+        }
+      }
+    },
+
+    "$other": { ".read": false, ".write": false }
+  }
+}

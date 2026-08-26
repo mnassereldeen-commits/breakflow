@@ -1,0 +1,17 @@
+{
+  "name": "BreakFlow",
+  "short_name": "BreakFlow",
+  "description": "Live break queue and timer for support teams.",
+  "start_url": "index.html",
+  "display": "standalone",
+  "background_color": "#070b14",
+  "theme_color": "#070b14",
+  "icons": [
+    {
+      "src": "assets/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

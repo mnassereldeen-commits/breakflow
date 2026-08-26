@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#070b14">
+<meta name="description" content="BreakFlow supervisor panel - live break board, queue control, policies and reports.">
+<title>BreakFlow · Admin</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
+<link rel="stylesheet" href="assets/css/app.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="top-in">
+    <a class="brand" href="index.html">
+      <span class="mark">B</span>
+      <span>BreakFlow<small id="teamName">Supervisor panel</small></span>
+    </a>
+    <div class="spacer"></div>
+    <span class="clock" id="clock"></span>
+    <div id="statusHost"></div>
+    <a class="pill" href="index.html">&#8592; Agent view</a>
+    <button class="pill" id="lockBtn" hidden>&#128274; Lock</button>
+  </div>
+</header>
+
+<main class="wrap wide" id="main">
+  <div class="card" style="text-align:center;padding:48px"><p class="muted">Connecting&hellip;</p></div>
+</main>
+
+<footer class="foot">BreakFlow supervisor panel</footer>
+
+<script type="module" src="assets/js/admin.js"></script>
+</body>
+</html>
