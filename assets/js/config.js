@@ -32,11 +32,9 @@ export const DB_ROOT = "breakflow";
    `globalMaxConcurrent` : ceiling across every break type combined. */
 export const DEFAULTS = {
   teamName: "Operations Floor",
-  adminPinHash: null,           // null => first PIN entered becomes the PIN
   globalMaxConcurrent: 3,       // hard ceiling on people away at once
   graceMinutes: 3,              // overtime keeps the slot this long
-  autoApprove: true,
-  requireQueueForAll: false,
+  allowSelfEnroll: true,        // open during onboarding, then lock it
   breakTypes: {
     bio:   { id: "bio",   name: "Bio Break",  minutes: 5,  maxConcurrent: 2, color: "#38bdf8", icon: "\u{1F6BB}", requiresApproval: false, order: 1 },
     short: { id: "short", name: "Short Break",minutes: 15, maxConcurrent: 2, color: "#a78bfa", icon: "\u{2615}",  requiresApproval: false, order: 2 },
@@ -44,5 +42,4 @@ export const DEFAULTS = {
     prayer:{ id: "prayer",name: "Prayer",     minutes: 10, maxConcurrent: 2, color: "#34d399", icon: "\u{1F54C}", requiresApproval: false, order: 4 },
     coach: { id: "coach", name: "Coaching / 1:1", minutes: 20, maxConcurrent: 1, color: "#f472b6", icon: "\u{1F4CB}", requiresApproval: true, order: 5 }
   },
-  agents: {}
 };

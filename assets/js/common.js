@@ -2,7 +2,7 @@
    BreakFlow - shared UI helpers
    ============================================================ */
 
-import { store, saveConfig, clearConfig, activeConfig, encodeConfig } from "./store.js";
+import { store, saveConfig, clearConfig, activeConfig, encodeConfig, ROLES } from "./store.js";
 
 /* ---------- DOM ----------------------------------------------------- */
 export const $ = (sel, root) => (root || document).querySelector(sel);
@@ -200,9 +200,140 @@ export function mountStatusPill(host) {
     if (mode === "firebase" && online) { pill.classList.add("ok"); label.textContent = "Live"; }
     else if (mode === "firebase") { pill.classList.add("warn"); label.textContent = "Reconnecting"; }
     else if (mode === "local") { pill.classList.add("warn"); label.textContent = "This device only"; }
-    else { pill.classList.add("bad"); label.textContent = "Offline"; }
+    else { pill.classList.add("bad"); label.textContent = "Not connected"; }
   });
   return pill;
+}
+
+/* ---------- write failures become visible -------------------------- */
+export function mountErrorToasts() {
+  store.onError(({ what, denied, error }) => {
+    if (denied) toast("Not allowed: you can't " + (what || "do that") + ". Only your own break is yours to change.", "error");
+    else toast("Couldn't " + (what || "save") + ": " + (error && (error.message || error.code) || "unknown error"), "error");
+  });
+}
+
+/* ---------- sign-in ------------------------------------------------ */
+const GOOGLE_G =
+  '<svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">' +
+  '<path fill="#4285F4" d="M45.1 24.5c0-1.6-.1-2.7-.4-3.9H24v7.4h12.1c-.2 2-1.5 5.1-5 7.1l-.1.3 5.4 4.2.4 0c3.5-3.2 5.3-8 5.3-13.1z"/>' +
+  '<path fill="#34A853" d="M24 46c4.8 0 8.8-1.6 11.8-4.3l-5.6-4.4c-1.5 1-3.5 1.8-6.2 1.8-4.7 0-8.7-3.1-10.1-7.4l-.3 0-5.5 4.3-.1.3C10.9 42.1 17 46 24 46z"/>' +
+  '<path fill="#FBBC05" d="M13.9 31.7c-.4-1.2-.6-2.4-.6-3.7s.2-2.5.6-3.7l0-.3-5.7-4.4-.2.1C6.8 22.5 6 25.2 6 28s.8 5.5 2 7.9l5.9-4.2z"/>' +
+  '<path fill="#EA4335" d="M24 10c3.3 0 5.6 1.4 6.9 2.6l5-4.9C32.7 4.9 28.8 3 24 3 17 3 10.9 6.9 8 12.5l5.9 4.6C15.3 13.1 19.3 10 24 10z"/>' +
+  "</svg>";
+
+export function googleButton(label) {
+  return el("button", {
+    class: "btn lg google", onclick: async (e) => {
+      const b = e.currentTarget;
+      b.disabled = true;
+      try { await store.signIn(); }
+      catch (err) { toast(signInHelp(err), "error"); }
+      finally { b.disabled = false; }
+    }
+  }, [el("span", { class: "g", html: GOOGLE_G }), label || "Sign in with Google"]);
+}
+
+function signInHelp(err) {
+  const code = (err && err.code) || "";
+  if (/unauthorized-domain/.test(code)) {
+    return "This site isn't on Firebase's authorised-domain list yet. Add " + location.hostname +
+      " under Authentication → Settings → Authorized domains.";
+  }
+  if (/operation-not-allowed/.test(code)) {
+    return "Google sign-in isn't switched on for this Firebase project yet (Authentication → Sign-in method).";
+  }
+  return "Sign-in failed: " + (code || (err && err.message) || "unknown error");
+}
+
+/** Full-page card shown when nobody is signed in. */
+export function signInGate(teamName) {
+  return el("div", { class: "gate" }, [
+    el("div", { class: "card pad-lg center", style: { maxWidth: "440px" } }, [
+      el("div", { class: "mark big", text: "B" }),
+      el("h2", { text: teamName ? teamName + " breaks" : "BreakFlow" }),
+      el("p", { class: "muted", style: { margin: "8px 0 20px" } },
+        ["Sign in so your breaks are yours. Only you can start or end your own break — not a colleague, not by accident."]),
+      googleButton(),
+      el("p", { class: "small dim", style: { marginTop: "18px" } },
+        ["Use your work Google account. This browser will stay signed in."])
+    ])
+  ]);
+}
+
+/** Shown when signed in but the roster is locked and they aren't on it. */
+export function notOnRosterGate(user) {
+  return el("div", { class: "gate" }, [
+    el("div", { class: "card pad-lg center", style: { maxWidth: "460px" } }, [
+      el("h2", { text: "You're not on the roster yet" }),
+      el("p", { class: "muted", style: { margin: "10px 0 6px" } }, [
+        "You're signed in as ", el("b", { text: (user && user.email) || "this account" }),
+        ", but a supervisor hasn't added you to this team."
+      ]),
+      el("p", { class: "small dim", style: { marginBottom: "18px" } },
+        ["Ask your supervisor to open the roster for a moment so you can join, or to check you signed in with the right account."]),
+      el("div", { class: "btn-row", style: { justifyContent: "center" } }, [
+        el("button", { class: "btn", text: "Try again", onclick: () => location.reload() }),
+        el("button", { class: "btn ghost", text: "Sign out", onclick: () => store.signOut().then(() => location.reload()) })
+      ])
+    ])
+  ]);
+}
+
+/** Header chip: avatar, name, sign out. */
+export function identityChip(host, opts) {
+  host.innerHTML = "";
+  const u = store.user;
+  const m = store.member;
+  if (!u) return;
+  const name = (m && m.name) || u.name || u.email;
+  const av = u.photo
+    ? el("img", { class: "av img", src: u.photo, alt: "", referrerpolicy: "no-referrer" })
+    : el("span", { class: "av", style: { "--h": hueFrom(name) }, text: initials(name) });
+
+  const chip = el("button", { class: "pill id-chip", title: "Your account" }, [
+    av,
+    el("span", { text: name }),
+    m && m.role === ROLES.ADMIN ? el("span", { class: "badge cy", text: "admin" }) : null
+  ]);
+  chip.addEventListener("click", () => accountDialog(opts));
+  host.append(chip);
+}
+
+function accountDialog(opts) {
+  const u = store.user;
+  const m = store.member || {};
+  const nm = input({ value: m.name || u.name || "", placeholder: "Display name" });
+  const tm = input({ value: m.team || "", placeholder: "Team / shift (optional)" });
+  const local = store.mode === "local";
+
+  modal("Your account", el("div", { class: "stack" }, [
+    el("p", { class: "small muted" }, [
+      local ? "Local demo - no sign-in." : "Signed in as ",
+      local ? null : el("b", { text: u.email || u.uid })
+    ]),
+    field("Display name", nm, "How your name appears on the board"),
+    field("Team", tm),
+    m.role === ROLES.ADMIN ? el("p", { class: "small" }, [
+      el("span", { class: "badge cy", text: "admin" }), " You can open the supervisor panel."
+    ]) : null
+  ]), [
+    local ? null : { label: "Sign out", kind: "ghost", onClick: async () => { await store.signOut(); location.reload(); } },
+    { label: "Cancel", kind: "ghost" },
+    {
+      label: "Save", kind: "primary", onClick: async () => {
+        const name = nm.value.trim();
+        if (!name) { toast("Name can't be empty", "error"); return false; }
+        try {
+          await store.update({
+            ["agents/" + u.uid + "/name"]: name,
+            ["agents/" + u.uid + "/team"]: tm.value.trim()
+          }, "change your details");
+          toast("Saved", "ok");
+        } catch (e) { return false; }
+      }
+    }
+  ].filter(Boolean));
 }
 
 /* ---------- clock in the header ------------------------------------ */
@@ -231,12 +362,15 @@ export function setupDialog() {
         : "Running on this device only. Paste a Firebase web config to make the board shared across the whole team."
     ]),
     el("details", { class: "howto" }, [
-      el("summary", { text: "How do I get this? (2 minutes)" }),
+      el("summary", { text: "How do I get this? (about 5 minutes)" }),
       el("ol", { class: "small" }, [
         el("li", { html: "Go to <b>console.firebase.google.com</b> and create a free project." }),
         el("li", { html: "Build &rarr; <b>Realtime Database</b> &rarr; Create database &rarr; start in <b>test mode</b>." }),
+        el("li", { html: "Build &rarr; <b>Authentication</b> &rarr; Get started &rarr; Sign-in method &rarr; <b>Google</b> &rarr; Enable." }),
+        el("li", { html: "Authentication &rarr; Settings &rarr; <b>Authorized domains</b> &rarr; Add <code>" + esc(location.hostname) + "</code>." }),
         el("li", { html: "Project settings &rarr; Your apps &rarr; <b>Web</b> &rarr; register app &rarr; copy the <code>firebaseConfig</code> object." }),
-        el("li", { html: "Paste it here. Then lock it down with the rules in <code>firebase-rules.json</code>." })
+        el("li", { html: "Paste it here and save." }),
+        el("li", { html: "Realtime Database &rarr; <b>Rules</b> &rarr; paste <code>firebase-rules.json</code> &rarr; Publish." })
       ])
     ]),
     field("Firebase web config (JSON)", ta),

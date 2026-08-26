@@ -1,60 +1,48 @@
 /* ============================================================
    BreakFlow - agent view
+
+   You are whoever you signed in as. There is no name picker, so
+   there is nothing to impersonate: the only break you can touch is
+   your own, and the database rules enforce that too.
    ============================================================ */
 
 import {
-  store, STATES, ROLES, reconcileMap, reconcile, sortedTypes, sortedAgents,
-  supervisors, occupancy, queueFor, listSessions, mySession, queuePosition,
-  estimateStart, requestBreak, endBreak, cancelQueued, dayKey, graceMs
+  store, STATES, ROLES, reconcile, sortedTypes, sortedAgents, supervisors,
+  occupancy, queueFor, listSessions, mySession, queuePosition, estimateStart,
+  requestBreak, endBreak, cancelQueued, dayKey, graceMs, isOver, isPresent,
+  onBreakNow
 } from "./store.js";
 
 import {
-  $, el, mmss, hhmm, human, toast, modal, field, input, beep, askNotify, notify,
+  $, el, mmss, hhmm, human, toast, modal, beep, askNotify, notify,
   flashTitle, stopFlash, setBaseTitle, mountStatusPill, mountClock, setFavicon,
-  initials, hueFrom, confirmBox, setupDialog
+  initials, hueFrom, confirmBox, setupDialog, mountErrorToasts,
+  signInGate, notOnRosterGate, identityChip
 } from "./common.js";
 
-const LS_ME = "breakflow.me";
 const RING_R = 110;
 const CIRC = 2 * Math.PI * RING_R;
-
-let me = null;           // { id, name, team }
-const seen = {};         // notification bookkeeping per session id
+const seen = {};
 
 /* ==================== boot ==================== */
 setFavicon();
 mountStatusPill($("#statusHost"));
 mountClock($("#clock"));
+mountErrorToasts();
 
 store.connect().then(() => {
-  store.onChange(onState);
+  store.onStatus(render);
+  store.onChange(render);
   setInterval(loop, 1000);
   loop();
 });
 
-function onState(state) {
-  $("#teamName").textContent = state.settings.teamName || "Team";
-  /* re-resolve my identity against the roster each time */
-  const savedId = localStorage.getItem(LS_ME);
-  if (savedId && state.agents[savedId]) me = state.agents[savedId];
-  else if (savedId && !state.agents[savedId] && me) { /* removed from roster */ me = null; localStorage.removeItem(LS_ME); }
+function me() { return store.member; }
 
-  /* once admins exist, only they see the panel link */
-  const link = document.querySelector('a.pill[href="admin.html"]');
-  if (link) {
-    const admins = supervisors(state);
-    link.hidden = admins.length > 0 && !(me && me.role === ROLES.ADMIN);
-  }
-  render();
-}
-
-/* run the queue engine + repaint clocks once a second */
 function loop() {
-  const state = store.state;
+  if (store.access !== "ok") return;
+  reconcile();
   const now = store.now();
-  /* only write if the engine would actually change something */
-  const probe = reconcileMap(JSON.parse(JSON.stringify(state.sessions || {})), state, now);
-  if (probe !== undefined) reconcile();
   tickClocks(now);
   watchMine(now);
 }
@@ -63,13 +51,32 @@ function loop() {
 function render() {
   const main = $("#main");
   const state = store.state;
+  $("#teamName").textContent = state.settings.teamName || "Team";
   main.innerHTML = "";
-  renderIdentityChip();
 
-  if (!me) { main.append(identityGate(state)); return; }
+  /* the panel link only appears for supervisors */
+  const link = document.querySelector('a.pill[href="admin.html"]');
+  if (link) link.hidden = !(me() && me().role === ROLES.ADMIN);
+
+  identityChip($("#idHost"));
+
+  if (store.mode === "connecting") {
+    main.append(el("div", { class: "card center", style: { padding: "48px" } }, [el("p", { class: "muted", text: "Connecting…" })]));
+    return;
+  }
+  if (store.mode === "error") {
+    main.append(connectionProblem());
+    return;
+  }
+  if (store.access === "signed-out") { main.append(signInGate(state.settings.teamName)); return; }
+  if (store.access === "not-on-roster") { main.append(notOnRosterGate(store.user)); return; }
+  if (store.access !== "ok" || !me()) {
+    main.append(el("div", { class: "card center", style: { padding: "48px" } }, [el("p", { class: "muted", text: "Loading your profile…" })]));
+    return;
+  }
 
   const now = store.now();
-  const mine = mySession(state, me.id);
+  const mine = mySession(state, store.uid());
 
   main.append(el("div", { class: "split" }, [
     el("div", { class: "stack" }, [
@@ -85,74 +92,18 @@ function render() {
   tickClocks(now);
 }
 
-/* ---------- identity ---------- */
-function renderIdentityChip() {
-  const host = $("#idHost");
-  host.innerHTML = "";
-  if (!me) return;
-  host.append(el("button", {
-    class: "pill", title: "Switch person",
-    onclick: () => { localStorage.removeItem(LS_ME); me = null; render(); }
-  }, [
-    el("span", { class: "av", style: { "--h": hueFrom(me.name), width: "20px", height: "20px", borderRadius: "6px", fontSize: "9px" }, text: initials(me.name) }),
-    el("span", { text: me.name })
-  ]));
-}
-
-function identityGate(state) {
-  const roster = sortedAgents(state);
-  const search = input({ placeholder: "Type your name to find yourself…", autofocus: true });
-  const list = el("div", { class: "stack", style: { gap: "6px", maxHeight: "300px", overflow: "auto" } });
-
-  const paint = () => {
-    const q = search.value.trim().toLowerCase();
-    const hits = roster.filter((a) => a.name.toLowerCase().includes(q));
-    list.innerHTML = "";
-    if (!hits.length) {
-      list.append(el("p", { class: "empty", text: roster.length ? "No match." : "No one on the roster yet." }));
-    }
-    for (const a of hits.slice(0, 40)) {
-      list.append(el("button", {
-        class: "btn ghost", style: { justifyContent: "flex-start" },
-        onclick: () => pickMe(a)
-      }, [
-        el("span", { class: "av", style: { "--h": hueFrom(a.name), width: "26px", height: "26px", borderRadius: "8px", fontSize: "10px" }, text: initials(a.name) }),
-        el("span", { text: a.name }),
-        a.team ? el("span", { class: "badge", text: a.team }) : null,
-        a.role === ROLES.ADMIN ? el("span", { class: "badge cy", text: "admin" }) : null
-      ]));
-    }
-    if (q && !roster.some((a) => a.name.toLowerCase() === q) && state.settings.allowSelfEnroll !== false) {
-      list.append(el("button", { class: "btn primary", onclick: () => enroll(search.value.trim()) },
-        ["＋ Add “" + search.value.trim() + "” to the roster"]));
-    }
-  };
-  search.addEventListener("input", paint);
-
-  const card = el("div", { class: "card pad-lg" }, [
-    el("div", { class: "card-head" }, [el("h2", { text: "Who are you?" })]),
-    el("p", { class: "muted small", text: "Pick your name once - this browser will remember you." }),
-    search,
-    el("div", { style: { height: "10px" } }),
-    list
+function connectionProblem() {
+  const err = store.lastError;
+  return el("div", { class: "gate" }, [
+    el("div", { class: "card pad-lg", style: { maxWidth: "480px" } }, [
+      el("h2", { text: "Can't reach the database" }),
+      el("p", { class: "muted small", text: (err && (err.message || err.code)) || "Unknown error." }),
+      el("div", { class: "btn-row", style: { marginTop: "14px" } }, [
+        el("button", { class: "btn primary", text: "Check the connection settings", onclick: () => setupDialog() }),
+        el("button", { class: "btn ghost", text: "Retry", onclick: () => location.reload() })
+      ])
+    ])
   ]);
-  paint();
-  return el("div", { class: "gate" }, [card]);
-}
-
-async function pickMe(a) {
-  localStorage.setItem(LS_ME, a.id);
-  me = a;
-  askNotify();
-  render();
-}
-
-async function enroll(name) {
-  if (!name) return;
-  const id = store.newId("agents");
-  await store.update({ ["agents/" + id]: { id: id, name: name, team: "", role: ROLES.AGENT, createdAt: store.now() } });
-  await pickMe({ id: id, name: name, team: "", role: ROLES.AGENT });
-  toast("Welcome, " + name + "!", "ok");
 }
 
 /* ---------- choose a break ---------- */
@@ -167,8 +118,7 @@ function chooseCard(state, now) {
     const cap = Number(bt.maxConcurrent || 1);
     const waiting = queueFor(state, bt.id).length;
     const free = Math.max(0, cap - used);
-    const blockedGlobal = occ.total >= globalMax;
-    const willQueue = free === 0 || blockedGlobal || bt.requiresApproval;
+    const willQueue = free === 0 || occ.total >= globalMax || bt.requiresApproval;
 
     const dots = el("div", { class: "slot-dots" });
     for (let i = 0; i < cap; i++) dots.append(el("i", { class: i < used ? "used" : "" }));
@@ -211,7 +161,7 @@ function ask(bt, willQueue, waiting) {
           " and start automatically the moment a slot opens."
         : "You'll go on " + bt.name + " straight away for " + bt.minutes + " minutes."
     ]),
-    el("p", { class: "muted small", text: "Your timer starts when the break starts, not when you request it." })
+    el("p", { class: "muted small", text: "Your timer starts when the break starts, not when you request it. Keep this tab open so the queue can reach you." })
   ]);
   modal(willQueue ? "Join the queue?" : "Start " + bt.name + "?", body, [
     { label: "Not now", kind: "ghost" },
@@ -219,7 +169,7 @@ function ask(bt, willQueue, waiting) {
       label: willQueue ? "Join queue" : "Start break", kind: "primary",
       onClick: async () => {
         try {
-          await requestBreak(me, bt);
+          await requestBreak(me(), bt);
           askNotify();
           beep("up");
         } catch (e) { toast(e.message || String(e), "error"); }
@@ -228,7 +178,7 @@ function ask(bt, willQueue, waiting) {
   ]);
 }
 
-/* ---------- my active break ---------- */
+/* ---------- my own break ---------- */
 function myBreakCard(state, s, now) {
   const bt = state.breakTypes[s.breakTypeId] || {};
   const color = bt.color || "#22d3ee";
@@ -247,8 +197,8 @@ function myBreakCard(state, s, now) {
       ]),
       el("div", { class: "big-name", text: (bt.icon || "") + " " + s.breakTypeName }),
       el("div", { class: "back-at" }, [
-        needsOk ? "A supervisor needs to release this one." :
-          est ? el("span", { "data-est": est }, ["Estimated start ≈ " + hhmm(est)]) : "Waiting…"
+        needsOk ? "A supervisor needs to release this one."
+          : est ? "Estimated start ≈ " + hhmm(est) : "Waiting…"
       ]),
       el("div", { style: { height: "8px" } }),
       el("button", {
@@ -262,9 +212,8 @@ function myBreakCard(state, s, now) {
     ]);
   }
 
-  const over = s.state === STATES.OVER || now > (s.endsAt || 0);
+  const over = isOver(s, now);
   const remain = (s.endsAt || now) - now;
-  const total = Math.max(1, (s.endsAt || now) - (s.startedAt || now));
   const warn = !over && remain <= 60000;
 
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -325,26 +274,23 @@ function coverageCard(state, now) {
 }
 
 function onBreakCard(state, now, mine) {
-  const g = graceMs(state);
-  const live = listSessions(state)
-    .filter((s) => s.state === STATES.ACTIVE || (s.state === STATES.OVER && now < (s.endsAt || 0) + g + 1800000))
-    .sort((a, b) => (a.endsAt || 0) - (b.endsAt || 0));
-
+  const live = onBreakNow(state, now);
   const box = el("div", {});
   if (!live.length) box.append(el("p", { class: "empty", text: "Nobody is on break right now." }));
   for (const s of live) {
     const bt = state.breakTypes[s.breakTypeId] || {};
-    const over = s.state === STATES.OVER || now > (s.endsAt || 0);
+    const over = isOver(s, now);
     const remain = (s.endsAt || now) - now;
-    box.append(el("div", { class: "person-row" + (mine && s.id === mine.id ? " mine" : "") }, [
+    const isMe = mine && s.id === mine.id;
+    box.append(el("div", { class: "person-row" + (isMe ? " mine" : "") }, [
       el("span", { class: "av", style: { "--h": hueFrom(s.agentName) }, text: initials(s.agentName) }),
       el("div", { class: "who" }, [
-        el("b", { text: s.agentName + (mine && s.id === mine.id ? " (you)" : "") }),
+        el("b", { text: s.agentName + (isMe ? " (you)" : "") }),
         el("span", { text: (bt.icon || "") + " " + s.breakTypeName + " · back " + hhmm(s.endsAt) })
       ]),
       el("span", {
         class: "rem " + (over ? "over" : remain <= 60000 ? "warn" : ""),
-        "data-cd": s.endsAt || 0, "data-signed": "1",
+        "data-cd": s.endsAt || 0,
         text: (over ? "+" : "") + mmss(Math.abs(remain))
       })
     ]));
@@ -365,16 +311,18 @@ function queueCard(state, now, mine) {
   q.forEach((s, i) => {
     const bt = state.breakTypes[s.breakTypeId] || {};
     const est = estimateStart(state, s, now);
-    box.append(el("div", { class: "person-row" + (mine && s.id === mine.id ? " mine" : "") }, [
+    const isMe = mine && s.id === mine.id;
+    const away = !isPresent(state, s.agentId, now);
+    box.append(el("div", { class: "person-row" + (isMe ? " mine" : "") }, [
       el("span", { class: "pos", text: String(i + 1) }),
       el("span", { class: "av", style: { "--h": hueFrom(s.agentName) }, text: initials(s.agentName) }),
       el("div", { class: "who" }, [
-        el("b", { text: s.agentName + (mine && s.id === mine.id ? " (you)" : "") }),
+        el("b", { text: s.agentName + (isMe ? " (you)" : "") }),
         el("span", { text: (bt.icon || "") + " " + s.breakTypeName + " · asked " + hhmm(s.requestedAt) })
       ]),
-      bt.requiresApproval && !s.approvedBy
-        ? el("span", { class: "badge warn", text: "approval" })
-        : el("span", { class: "rem dim", style: { fontSize: "12.5px" }, text: est && est > now ? "≈" + human(est - now) : "next" })
+      away ? el("span", { class: "badge warn", text: "away" })
+        : bt.requiresApproval && !s.approvedBy ? el("span", { class: "badge warn", text: "approval" })
+          : el("span", { class: "rem dim", style: { fontSize: "12.5px" }, text: est && est > now ? "≈" + human(est - now) : "next" })
     ]));
   });
   return el("div", { class: "card" }, [
@@ -388,10 +336,11 @@ function queueCard(state, now, mine) {
 
 function myDayCard(state, now) {
   const today = dayKey(now);
+  const uid = store.uid();
   const mine = listSessions(state).filter(
-    (s) => s.agentId === me.id && s.day === today && [STATES.DONE, STATES.OVER, STATES.ACTIVE].includes(s.state)
+    (s) => s.agentId === uid && s.day === today && s.startedAt && s.state !== STATES.CANCELLED && s.state !== STATES.DENIED
   );
-  const used = mine.reduce((t, s) => t + Math.max(0, ((s.endedAt || now) - (s.startedAt || now))), 0);
+  const used = mine.reduce((t, s) => t + Math.max(0, (s.endedAt || now) - s.startedAt), 0);
   const overs = mine.filter((s) => (s.overBy || 0) > 30000).length;
   const list = el("div", {});
   const done = mine.filter((s) => s.state === STATES.DONE).sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
@@ -423,8 +372,7 @@ function myDayCard(state, now) {
 /* ==================== clock repaint ==================== */
 function tickClocks(now) {
   for (const n of document.querySelectorAll("[data-cd]")) {
-    const ends = Number(n.getAttribute("data-cd"));
-    const d = ends - now;
+    const d = Number(n.getAttribute("data-cd")) - now;
     const over = d < 0;
     n.textContent = (over ? "+" : "") + mmss(Math.abs(d));
     if (n.classList.contains("rem")) {
@@ -453,18 +401,12 @@ function tickClocks(now) {
       else if (ends - now <= 60000) prog.setAttribute("stroke", "#fbbf24");
     }
   }
-  for (const n of document.querySelectorAll("[data-bar]")) {
-    const ends = Number(n.getAttribute("data-endsat"));
-    const start = Number(n.getAttribute("data-startedat"));
-    const total = Math.max(1, ends - start);
-    n.style.width = Math.max(0, Math.min(100, ((ends - now) / total) * 100)) + "%";
-  }
 }
 
 /* ==================== alerts for my own break ==================== */
 function watchMine(now) {
-  if (!me) return;
-  const s = mySession(store.state, me.id);
+  if (!me()) return;
+  const s = mySession(store.state, store.uid());
   if (!s) { stopFlash(); setBaseTitle("BreakFlow"); return; }
   const f = seen[s.id] || (seen[s.id] = {});
 
@@ -498,5 +440,4 @@ function watchMine(now) {
   }
 }
 
-/* expose for the console / debugging */
 window.BreakFlow = { store: store, setup: setupDialog };

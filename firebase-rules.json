@@ -1,28 +1,78 @@
+// BreakFlow - Realtime Database security rules.
+//
+// Paste the whole file into: Firebase Console -> Realtime Database -> Rules -> Publish.
+// The console accepts these // comments.
+//
+// The short version:
+//   * You must be signed in with Google to see anything.
+//   * Once the roster is locked, only people on the roster can see anything.
+//   * You may create and change YOUR OWN break, and nobody else's.
+//   * You cannot delete or rewrite a break that has already closed,
+//     so an overstay can't be erased after the fact.
+//   * You cannot promote yourself to admin.
+//   * Admins can do all of it.
+//
+// Optional extra lock: to accept only company Google accounts, add this to
+// the ".read" line below (and to each ".write"), with your own domain:
+//     && auth.token.email.endsWith('@your-company.com')
+
 {
   "rules": {
     "breakflow": {
-      ".read": "auth != null",
-      ".write": "auth != null",
 
-      "settings": { ".write": "auth != null" },
-      "breakTypes": { ".write": "auth != null" },
+      // Roster members always. Anyone signed in while the roster is still
+      // open, so the team can enrol themselves during onboarding.
+      ".read": "auth != null && (root.child('breakflow/agents').child(auth.uid).exists() || root.child('breakflow/settings/allowSelfEnroll').val() != false)",
+
+      // Floor policy: admins. Open only until the first admin exists,
+      // so the very first person to sign in can claim the board.
+      "settings": {
+        ".write": "root.child('breakflow/agents').child(auth.uid).child('role').val() == 'admin' || root.child('breakflow/settings/hasAdmin').val() != true"
+      },
+
+      // Break policies: admins only.
+      "breakTypes": {
+        ".write": "root.child('breakflow/agents').child(auth.uid).child('role').val() == 'admin'"
+      },
 
       "agents": {
-        "$aid": {
-          "name": { ".validate": "newData.isString() && newData.val().length <= 80" },
-          "team": { ".validate": "newData.isString() && newData.val().length <= 60" }
+        "$uid": {
+          // Edit your own record; admins edit anyone. Joining the roster
+          // requires the roster to still be open.
+          ".write": "root.child('breakflow/agents').child(auth.uid).child('role').val() == 'admin' || ($uid == auth.uid && (data.exists() || root.child('breakflow/settings/allowSelfEnroll').val() != false))",
+
+          // No self-promotion. Only an existing admin hands out the admin
+          // role - except the very first sign-in, which claims it.
+          "role": {
+            ".validate": "(newData.val() == 'agent' || newData.val() == 'admin') && (newData.val() == data.val() || newData.val() == 'agent' || root.child('breakflow/agents').child(auth.uid).child('role').val() == 'admin' || root.child('breakflow/settings/hasAdmin').val() != true)"
+          },
+
+          "uid": { ".validate": "newData.val() == $uid" },
+          "name": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 80" },
+          "email": { ".validate": "newData.isString() && newData.val().length <= 200" },
+          "team": { ".validate": "newData.isString() && newData.val().length <= 60" },
+          "lastSeen": { ".validate": "newData.isNumber()" }
         }
       },
 
       "sessions": {
         "$sid": {
-          "state": { ".validate": "newData.val().matches(/^(queued|active|over|done|cancelled|denied)$/)" },
+          // THE IMPORTANT ONE.
+          // create : only a break whose agentId is you
+          // change : only your own, and only while it is still open
+          // delete : never (admins only)
+          ".write": "root.child('breakflow/agents').child(auth.uid).child('role').val() == 'admin' || (!data.exists() && newData.child('agentId').val() == auth.uid) || (data.exists() && newData.exists() && data.child('agentId').val() == auth.uid && newData.child('agentId').val() == auth.uid && data.child('state').val() != 'done' && data.child('state').val() != 'cancelled' && data.child('state').val() != 'denied')",
+
+          "agentId": { ".validate": "newData.isString() && newData.val().length <= 128" },
           "agentName": { ".validate": "newData.isString() && newData.val().length <= 80" },
-          "minutes": { ".validate": "newData.isNumber() && newData.val() > 0 && newData.val() <= 60" }
+          "state": { ".validate": "newData.val().matches(/^(queued|active|over|done|cancelled|denied)$/)" },
+          "minutes": { ".validate": "newData.isNumber() && newData.val() > 0 && newData.val() <= 60" },
+          "breakTypeId": { ".validate": "newData.isString() && newData.val().length <= 40" }
         }
       }
     },
 
-    "$other": { ".read": false, ".write": false }
+    // Nothing outside /breakflow is reachable.
+    "$everythingElse": { ".read": false, ".write": false }
   }
 }

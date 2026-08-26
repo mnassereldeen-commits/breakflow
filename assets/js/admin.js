@@ -1,78 +1,95 @@
 /* ============================================================
    BreakFlow - supervisor panel
+
+   No PIN. You get in because your signed-in account has the admin
+   role, and the database rules agree. Everything you do here is
+   recorded under your name.
    ============================================================ */
 
 import {
-  store, STATES, ROLES, MAX_BREAK_MINUTES, clampMinutes, reconcileMap, reconcile,
+  store, STATES, ROLES, MAX_BREAK_MINUTES, clampMinutes, reconcile,
   sortedTypes, sortedAgents, supervisors, occupancy, queueFor, listSessions,
-  endBreak, cancelQueued, denyQueued, approveQueued, forceStart, adjustTime,
-  startForAgent, dayKey, graceMs, encodeConfig, activeConfig
+  onBreakNow, endBreak, denyQueued, approveQueued, forceStart, adjustTime,
+  startForAgent, dayKey, isOver, isPresent, encodeConfig, activeConfig
 } from "./store.js";
 
 import {
   $, el, mmss, hhmm, human, toast, modal, confirmBox, field, input, select,
-  mountStatusPill, mountClock, setFavicon, initials, hueFrom, sha256,
-  csv, download, setupDialog, beep, notify, askNotify
+  mountStatusPill, mountClock, setFavicon, initials, hueFrom,
+  csv, download, setupDialog, beep, notify, askNotify, mountErrorToasts,
+  signInGate, notOnRosterGate, identityChip
 } from "./common.js";
 
-const SESSION_KEY = "breakflow.admin.session";
-const LS_ACTOR = "breakflow.admin.actor";
-
-let unlocked = false;
 let tab = location.hash.replace("#", "") || "live";
-let alerted = {};
-let actorId = localStorage.getItem(LS_ACTOR) || "";
-
-/** Name recorded against supervisor actions (approve / deny / close / override). */
-function actor() {
-  const a = (store.state.agents || {})[actorId];
-  return a && a.role === ROLES.ADMIN ? a.name : "admin";
-}
+const alerted = {};
 
 const PALETTE = ["#22d3ee", "#a78bfa", "#fbbf24", "#34d399", "#f472b6", "#60a5fa", "#fb923c", "#f87171", "#c084fc", "#4ade80"];
 const ICONS = ["☕", "🍴", "🚻", "🕌", "🚬", "📋", "💻", "📞", "🧘", "🩺", "🚶", "🎧"];
+
+/** Whose name lands in the audit trail. */
+function actor() {
+  return (store.member && store.member.name) || "admin";
+}
+function isAdmin() { return store.isAdmin(); }
 
 /* ==================== boot ==================== */
 setFavicon();
 mountStatusPill($("#statusHost"));
 mountClock($("#clock"));
-unlocked = sessionStorage.getItem(SESSION_KEY) === "1";
-
-$("#lockBtn").addEventListener("click", () => {
-  sessionStorage.removeItem(SESSION_KEY);
-  unlocked = false;
-  render();
-});
+mountErrorToasts();
 
 store.connect().then(() => {
+  store.onStatus(render);
   store.onChange(render);
   setInterval(loop, 1000);
   loop();
 });
 
 function loop() {
-  const state = store.state;
-  const now = store.now();
-  const probe = reconcileMap(JSON.parse(JSON.stringify(state.sessions || {})), state, now);
-  if (probe !== undefined) reconcile();
-  if (unlocked) { tickClocks(now); watchOverstays(now); }
+  if (store.access !== "ok") return;
+  reconcile();
+  if (isAdmin()) { tickClocks(store.now()); watchOverstays(store.now()); }
 }
 
-/* ==================== gate ==================== */
+/* ==================== gates ==================== */
 function render() {
   const state = store.state;
   $("#teamName").textContent = (state.settings.teamName || "Team") + " · admin";
-  $("#lockBtn").hidden = !unlocked;
   const main = $("#main");
   main.innerHTML = "";
-  if (!unlocked) { main.append(pinGate(state)); return; }
+  identityChip($("#idHost"));
+
+  if (store.mode === "connecting") {
+    main.append(el("div", { class: "card center", style: { padding: "48px" } }, [el("p", { class: "muted", text: "Connecting…" })]));
+    return;
+  }
+  if (store.mode === "error") {
+    main.append(el("div", { class: "gate" }, [
+      el("div", { class: "card pad-lg", style: { maxWidth: "480px" } }, [
+        el("h2", { text: "Can't reach the database" }),
+        el("p", { class: "muted small", text: (store.lastError && (store.lastError.message || store.lastError.code)) || "Unknown error." }),
+        el("div", { class: "btn-row", style: { marginTop: "14px" } }, [
+          el("button", { class: "btn primary", text: "Connection settings", onclick: () => setupDialog() }),
+          el("button", { class: "btn ghost", text: "Retry", onclick: () => location.reload() })
+        ])
+      ])
+    ]));
+    return;
+  }
+  if (store.access === "signed-out") { main.append(signInGate(state.settings.teamName)); return; }
+  if (store.access === "not-on-roster") { main.append(notOnRosterGate(store.user)); return; }
+  if (store.access !== "ok" || !store.member) {
+    main.append(el("div", { class: "card center", style: { padding: "48px" } }, [el("p", { class: "muted", text: "Loading…" })]));
+    return;
+  }
+  if (!isAdmin()) { main.append(notSupervisor()); return; }
 
   const nav = el("div", { class: "tabs" });
   const TABS = [
     ["live", "Live board"],
     ["queue", "Queue"],
     ["types", "Break policies"],
-    ["roster", "Roster"],
+    ["roster", "Roster & access"],
     ["reports", "Reports"],
     ["settings", "Settings"]
   ];
@@ -84,7 +101,9 @@ function render() {
     }));
   }
   main.append(nav);
-  main.append(actorBar(state));
+
+  /* the Roster tab has a fuller version of this, so don't say it twice */
+  if (state.settings.allowSelfEnroll !== false && tab !== "roster") main.append(openRosterBanner());
 
   const body = el("div", { class: "stack" });
   const now = store.now();
@@ -98,88 +117,54 @@ function render() {
   tickClocks(now);
 }
 
-/** "Signed in as" strip: names the supervisor behind every override. */
-function actorBar(state) {
-  const admins = supervisors(state);
-  if (!admins.length) {
-    return el("div", { class: "actor-bar" }, [
-      el("span", { class: "tiny", text: "No admins on the roster" }),
-      el("span", { class: "small muted", text: "Add one under Roster so overrides are attributable." }),
+function notSupervisor() {
+  return el("div", { class: "gate" }, [
+    el("div", { class: "card pad-lg center", style: { maxWidth: "440px" } }, [
+      el("h2", { text: "Supervisors only" }),
+      el("p", { class: "muted", style: { margin: "10px 0 18px" } }, [
+        "You're signed in as ", el("b", { text: store.member.name }),
+        ", which is an agent account. Ask an existing admin to switch your role over on the Roster tab."
+      ]),
+      el("div", { class: "btn-row", style: { justifyContent: "center" } }, [
+        el("a", { class: "btn primary", href: "index.html", text: "← Back to my breaks" })
+      ])
+    ])
+  ]);
+}
+
+function openRosterBanner() {
+  return el("div", { class: "callout", style: { marginBottom: "16px" } }, [
+    el("div", { class: "row wrap" }, [
+      el("span", {}, ["⚠ The roster is open — anyone who opens the link with a Google account can join this board. Lock it once your team has signed in."]),
       el("div", { class: "spacer" }),
-      el("button", { class: "btn sm", text: "Go to Roster", onclick: () => { tab = "roster"; location.hash = "roster"; render(); } })
-    ]);
-  }
-  if (!admins.some((a) => a.id === actorId)) {
-    actorId = admins[0].id;
-    localStorage.setItem(LS_ACTOR, actorId);
-  }
-  const sel = select(admins.map((a) => ({ value: a.id, label: a.name })), actorId, {
-    style: "width:auto;min-width:180px"
-  });
-  sel.addEventListener("change", () => {
-    actorId = sel.value;
-    localStorage.setItem(LS_ACTOR, actorId);
-    toast("Acting as " + actor(), "ok");
-  });
-  return el("div", { class: "actor-bar" }, [
-    el("span", { class: "tiny", text: "Signed in as" }),
-    sel,
-    el("span", { class: "small dim", text: "recorded on every approval, override and forced close" })
+      el("button", { class: "btn sm", text: "Lock the roster", onclick: lockRoster })
+    ])
   ]);
 }
 
-function pinGate(state) {
-  const first = !state.settings.adminPinHash;
-  const pin = el("input", { class: "in pin-in", type: "password", inputmode: "numeric", maxlength: "8", placeholder: "••••" });
-  const msg = el("p", { class: "small err", style: { minHeight: "18px" } });
-
-  const submit = async () => {
-    const v = pin.value.trim();
-    if (v.length < 4) { msg.textContent = "Use at least 4 digits."; return; }
-    const h = await sha256(v);
-    if (first) {
-      await store.update({ "settings/adminPinHash": h });
-      unlock();
-      toast("Admin PIN set. Keep it safe.", "ok");
-      return;
-    }
-    if (h === state.settings.adminPinHash) unlock();
-    else { msg.textContent = "Wrong PIN."; pin.value = ""; pin.focus(); }
-  };
-  pin.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
-
-  const card = el("div", { class: "card pad-lg" }, [
-    el("h2", { text: first ? "Set the admin PIN" : "Supervisor panel" }),
-    el("p", { class: "muted small", text: first ? "Nobody has claimed this board yet. Choose a PIN - it is stored hashed, and everyone else will need it." : "Enter the admin PIN to continue." }),
-    pin, msg,
-    el("button", { class: "btn primary block", onclick: submit, text: first ? "Set PIN & open panel" : "Unlock" }),
-    el("p", { class: "small dim", style: { marginTop: "14px" }, text: store.mode === "local" ? "Note: no shared database connected - this panel is showing local data only." : "" })
-  ]);
-  return el("div", { class: "gate" }, [card]);
+async function lockRoster() {
+  const n = sortedAgents(store.state).length;
+  if (!(await confirmBox("Lock the roster?",
+    "The " + n + " people already signed in keep working normally. Anyone new who opens the link will be told to ask a supervisor. You can reopen it any time.",
+    "Lock it"))) return;
+  await store.update({ "settings/allowSelfEnroll": false }, "lock the roster");
+  toast("Roster locked — only these " + n + " people can get in", "ok");
 }
 
-function unlock() {
-  unlocked = true;
-  sessionStorage.setItem(SESSION_KEY, "1");
-  askNotify();
-  render();
-}
-
-/* ---------- "how many can go at once" controls ---------- */
+/* ---------- concurrency controls ---------- */
 function stepper(value, min, max, onChange) {
-  const box = el("div", { class: "stepper" }, [
+  return el("div", { class: "stepper" }, [
     el("button", { class: "btn sm", text: "−", title: "one fewer", onclick: () => onChange(Math.max(min, value - 1)) }),
     el("b", { text: String(value) }),
     el("button", { class: "btn sm", text: "+", title: "one more", onclick: () => onChange(Math.min(max, value + 1)) })
   ]);
-  return box;
 }
 
 function concurrencyCard(state, now) {
   const occ = occupancy(state, now);
   const globalMax = Number(state.settings.globalMaxConcurrent || 1);
-
   const rows = el("div", { class: "conc-list" });
+
   rows.append(el("div", { class: "conc-row lead" }, [
     el("span", { class: "ico", text: "🏢" }),
     el("div", { class: "who" }, [
@@ -188,7 +173,7 @@ function concurrencyCard(state, now) {
     ]),
     el("span", { class: "badge " + (occ.total >= globalMax ? "warn" : "ok"), text: occ.total + " away now" }),
     stepper(globalMax, 1, 50, async (v) => {
-      await store.update({ "settings/globalMaxConcurrent": v });
+      await store.update({ "settings/globalMaxConcurrent": v }, "change the floor cap");
       await reconcile();
       toast("Floor cap set to " + v, "ok");
     })
@@ -197,17 +182,16 @@ function concurrencyCard(state, now) {
   for (const bt of sortedTypes(state)) {
     const used = occ.perType[bt.id] || 0;
     const cap = Number(bt.maxConcurrent || 1);
+    const waiting = queueFor(state, bt.id).length;
     rows.append(el("div", { class: "conc-row", style: { "--c": bt.color || "#22d3ee" } }, [
       el("span", { class: "ico", text: bt.icon || "☕" }),
       el("div", { class: "who" }, [
         el("b", { text: bt.name }),
         el("span", { text: bt.minutes + " min · " + used + " of " + cap + " slots in use" })
       ]),
-      queueFor(state, bt.id).length
-        ? el("span", { class: "badge cy", text: queueFor(state, bt.id).length + " waiting" })
-        : null,
+      waiting ? el("span", { class: "badge cy", text: waiting + " waiting" }) : null,
       stepper(cap, 1, 50, async (v) => {
-        await store.update({ ["breakTypes/" + bt.id + "/maxConcurrent"]: v });
+        await store.update({ ["breakTypes/" + bt.id + "/maxConcurrent"]: v }, "change the slot count");
         await reconcile();
         toast(bt.name + ": " + v + " at a time", "ok");
       })
@@ -220,18 +204,16 @@ function concurrencyCard(state, now) {
       el("span", { class: "tiny", text: "changes apply instantly" })
     ]),
     rows,
-    el("p", { class: "small dim", style: { marginTop: "10px" } }, [
-      "Raising a number promotes people from the queue immediately. Lowering it never interrupts a break already running - the extra slots simply stop being handed out."
-    ])
+    el("p", { class: "small dim", style: { marginTop: "10px" } },
+      ["Raising a number promotes people from the queue immediately. Lowering it never interrupts a break already running — the extra slots simply stop being handed out."])
   ]);
 }
 
-/** Extend / shorten a break, explaining the one-hour ceiling if we hit it. */
 async function bump(s, delta) {
   const r = await adjustTime(s.id, delta);
   if (r && r.clamped) {
     if (!r.applied) toast(s.agentName + " is already at the " + MAX_BREAK_MINUTES + "-minute maximum.", "error");
-    else toast("Capped at " + MAX_BREAK_MINUTES + " minutes - added " + r.applied + "m only.", "info");
+    else toast("Capped at " + MAX_BREAK_MINUTES + " minutes — added " + r.applied + "m only.", "info");
   }
 }
 
@@ -239,21 +221,18 @@ async function bump(s, delta) {
 function liveTab(state, now) {
   const occ = occupancy(state, now);
   const globalMax = Number(state.settings.globalMaxConcurrent || 3);
-  const g = graceMs(state);
-  const live = listSessions(state)
-    .filter((s) => s.state === STATES.ACTIVE || (s.state === STATES.OVER && now < (s.endsAt || 0) + g + 3600000))
-    .sort((a, b) => (a.endsAt || 0) - (b.endsAt || 0));
+  const live = onBreakNow(state, now);
   const q = queueFor(state);
-  const overs = live.filter((s) => now > (s.endsAt || 0));
+  const overs = live.filter((s) => isOver(s, now));
   const today = dayKey(now);
-  const todays = listSessions(state).filter((s) => s.day === today);
+  const todays = listSessions(state).filter((s) => s.day === today && s.startedAt);
 
   const grid = el("div", { class: "live-grid" });
   if (!live.length) grid.append(el("p", { class: "empty", text: "Nobody is on break right now." }));
 
   for (const s of live) {
     const bt = state.breakTypes[s.breakTypeId] || {};
-    const over = now > (s.endsAt || 0);
+    const over = isOver(s, now);
     const remain = (s.endsAt || now) - now;
     const warn = !over && remain <= 60000;
     grid.append(el("div", {
@@ -283,7 +262,7 @@ function liveTab(state, now) {
       el("div", { class: "stat " + (occ.total >= globalMax ? "warn" : "ok") }, [el("b", { text: occ.total + "/" + globalMax }), el("span", { text: "Away now" })]),
       el("div", { class: "stat" }, [el("b", { text: String(q.length) }), el("span", { text: "In queue" })]),
       el("div", { class: "stat " + (overs.length ? "bad" : "") }, [el("b", { text: String(overs.length) }), el("span", { text: "Over time" })]),
-      el("div", { class: "stat" }, [el("b", { text: String(todays.filter((s) => s.startedAt).length) }), el("span", { text: "Breaks today" })]),
+      el("div", { class: "stat" }, [el("b", { text: String(todays.length) }), el("span", { text: "Breaks today" })]),
       el("div", { class: "stat" }, [el("b", { text: String(sortedAgents(state).length) }), el("span", { text: "Roster" })])
     ]),
     overs.length ? el("div", { class: "callout" }, [
@@ -313,6 +292,7 @@ function queueList(state, now, q) {
   q.forEach((s, i) => {
     const bt = state.breakTypes[s.breakTypeId] || {};
     const needsOk = bt.requiresApproval && !s.approvedBy;
+    const away = !isPresent(state, s.agentId, now);
     box.append(el("div", { class: "person-row" }, [
       el("span", { class: "pos", text: String(i + 1) }),
       el("span", { class: "av", style: { "--h": hueFrom(s.agentName) }, text: initials(s.agentName) }),
@@ -320,6 +300,7 @@ function queueList(state, now, q) {
         el("b", { text: s.agentName }),
         el("span", { text: (bt.icon || "") + " " + s.breakTypeName + " · waiting " + human(now - (s.requestedAt || now)) })
       ]),
+      away ? el("span", { class: "badge warn", title: "No recent activity — being passed over until they're back at the page", text: "away" }) : null,
       needsOk ? el("span", { class: "badge warn", text: "needs approval" }) : null,
       el("div", { class: "btn-row" }, [
         needsOk ? el("button", { class: "btn sm ok", text: "Approve", onclick: () => approveQueued(s.id, actor()) }) : null,
@@ -338,25 +319,23 @@ function queueList(state, now, q) {
 
 function askReason(who) {
   return new Promise((resolve) => {
-    const inp = input({ placeholder: "Optional reason (agent won't see it)" });
-    let done = false;
+    const inp = input({ placeholder: "Optional note for the record" });
     modal("Deny " + who + "'s request?", el("div", { class: "stack" }, [
       el("p", { class: "muted small", text: "They'll be removed from the queue and can request again." }),
       field("Reason", inp)
     ]), [
-      { label: "Cancel", kind: "ghost", onClick: () => { done = true; resolve(null); } },
-      { label: "Deny", kind: "danger", onClick: () => { done = true; resolve(inp.value.trim()); } }
+      { label: "Cancel", kind: "ghost", onClick: () => resolve(null) },
+      { label: "Deny", kind: "danger", onClick: () => resolve(inp.value.trim()) }
     ]);
-    setTimeout(() => { if (!done) { /* closed via X */ } }, 0);
   });
 }
 
 function manualStart(state) {
   const agents = sortedAgents(state);
   const types = sortedTypes(state);
-  if (!agents.length) { toast("Add someone to the roster first.", "error"); return; }
+  if (!agents.length) { toast("Nobody on the roster yet.", "error"); return; }
   if (!types.length) { toast("Create a break policy first.", "error"); return; }
-  const aSel = select(agents.map((a) => ({ value: a.id, label: a.name })), agents[0].id);
+  const aSel = select(agents.map((a) => ({ value: a.uid, label: a.name })), agents[0].uid);
   const tSel = select(types.map((t) => ({ value: t.id, label: t.name + " (" + t.minutes + "m)" })), types[0].id);
   modal("Put someone on break", el("div", { class: "stack" }, [
     el("p", { class: "muted small", text: "Starts immediately and ignores the queue and slot limits." }),
@@ -367,7 +346,7 @@ function manualStart(state) {
       label: "Start break", kind: "primary", onClick: async () => {
         const a = state.agents[aSel.value];
         const t = state.breakTypes[tSel.value];
-        const open = listSessions(state).some((s) => s.agentId === a.id && [STATES.QUEUED, STATES.ACTIVE, STATES.OVER].includes(s.state));
+        const open = listSessions(state).some((s) => s.agentId === a.uid && [STATES.QUEUED, STATES.ACTIVE, STATES.OVER].includes(s.state));
         if (open) { toast(a.name + " already has an open break.", "error"); return false; }
         await startForAgent(a, t, actor());
         toast(a.name + " is on " + t.name, "ok");
@@ -379,8 +358,8 @@ function manualStart(state) {
 /* ==================== queue tab ==================== */
 function queueTab(state, now) {
   const q = queueFor(state);
+  const occ = occupancy(state, now);
   const byType = sortedTypes(state).map((bt) => {
-    const occ = occupancy(state, now);
     const used = occ.perType[bt.id] || 0;
     const cap = Number(bt.maxConcurrent || 1);
     const waiting = q.filter((s) => s.breakTypeId === bt.id);
@@ -424,7 +403,7 @@ function typesTab(state) {
   const box = el("div", { class: "stack" });
   for (const bt of sortedTypes(state)) box.append(typeEditor(state, bt));
   return el("div", { class: "stack" }, [
-    el("div", { class: "callout cy", text: "Slots decide how many people can be on that break at the same time. The floor-wide cap in Settings always wins." }),
+    el("div", { class: "callout cy", text: "Slots decide how many people can be on that break at the same time. The floor-wide cap in Settings always wins. No break may be longer than " + MAX_BREAK_MINUTES + " minutes." }),
     el("div", { class: "card" }, [
       el("div", { class: "card-head" }, [
         el("h2", { text: "Break policies" }),
@@ -438,7 +417,7 @@ function typesTab(state) {
 function typeEditor(state, bt) {
   const nm = input({ value: bt.name });
   const mins = input({ type: "number", min: "1", max: String(MAX_BREAK_MINUTES), value: bt.minutes });
-  const cap = input({ type: "number", min: "1", max: "99", value: bt.maxConcurrent });
+  const cap = input({ type: "number", min: "1", max: "50", value: bt.maxConcurrent });
   const ord = input({ type: "number", min: "1", max: "99", value: bt.order || 1 });
   const appr = el("input", { type: "checkbox", checked: !!bt.requiresApproval });
   let color = bt.color || "#22d3ee";
@@ -446,12 +425,19 @@ function typeEditor(state, bt) {
 
   const sw = el("div", { class: "swatches" });
   PALETTE.forEach((c) => {
-    const s = el("div", { class: "swatch" + (c === color ? " on" : ""), style: { background: c }, onclick: () => { color = c; sw.querySelectorAll(".swatch").forEach((x) => x.classList.remove("on")); s.classList.add("on"); wrap.style.setProperty("--c", c); } });
+    const s = el("div", {
+      class: "swatch" + (c === color ? " on" : ""), style: { background: c },
+      onclick: () => { color = c; sw.querySelectorAll(".swatch").forEach((x) => x.classList.remove("on")); s.classList.add("on"); wrap.style.setProperty("--c", c); }
+    });
     sw.append(s);
   });
   const ic = el("div", { class: "swatches" });
   ICONS.forEach((c) => {
-    const s = el("div", { class: "swatch" + (c === icon ? " on" : ""), style: { display: "grid", placeItems: "center", background: "rgba(148,163,184,.14)" }, text: c, onclick: () => { icon = c; ic.querySelectorAll(".swatch").forEach((x) => x.classList.remove("on")); s.classList.add("on"); } });
+    const s = el("div", {
+      class: "swatch" + (c === icon ? " on" : ""),
+      style: { display: "grid", placeItems: "center", background: "rgba(148,163,184,.14)" }, text: c,
+      onclick: () => { icon = c; ic.querySelectorAll(".swatch").forEach((x) => x.classList.remove("on")); s.classList.add("on"); }
+    });
     ic.append(s);
   });
 
@@ -463,16 +449,16 @@ function typeEditor(state, bt) {
       id: bt.id,
       name: nm.value.trim() || bt.name,
       minutes: minutes,
-      maxConcurrent: Math.max(1, Number(cap.value) || 1),
+      maxConcurrent: Math.max(1, Math.min(50, Number(cap.value) || 1)),
       order: Math.max(1, Number(ord.value) || 1),
       requiresApproval: appr.checked,
       color: color, icon: icon
     };
-    await store.update(patch);
+    try { await store.update(patch, "save the break policy"); } catch (e) { return; }
     await reconcile();
     if (wanted > MAX_BREAK_MINUTES) {
       mins.value = minutes;
-      toast("Breaks cannot exceed " + MAX_BREAK_MINUTES + " minutes - saved as " + minutes + ".", "error");
+      toast("Breaks cannot exceed " + MAX_BREAK_MINUTES + " minutes — saved as " + minutes + ".", "error");
     } else {
       toast(patch["breakTypes/" + bt.id].name + " saved", "ok");
     }
@@ -480,13 +466,12 @@ function typeEditor(state, bt) {
 
   const wrap = el("div", { class: "type-edit", style: { "--c": color } }, [
     el("div", { class: "inline-fields" }, [
-      field("Name", nm), field("Minutes", mins, "1 – " + MAX_BREAK_MINUTES),
+      field("Name", nm),
+      field("Minutes", mins, "1 – " + MAX_BREAK_MINUTES),
       field("How many at once", cap, "concurrent slots"),
       field("Sort order", ord)
     ]),
-    el("div", { class: "inline-fields" }, [
-      field("Colour", sw), field("Icon", ic)
-    ]),
+    el("div", { class: "inline-fields" }, [field("Colour", sw), field("Icon", ic)]),
     el("div", { class: "row wrap" }, [
       el("label", { class: "check" }, [appr, "Requires supervisor approval"]),
       el("div", { class: "spacer" }),
@@ -494,7 +479,7 @@ function typeEditor(state, bt) {
       el("button", {
         class: "btn sm danger", text: "Delete", onclick: async () => {
           if (await confirmBox("Delete " + bt.name + "?", "Existing history keeps the name. Agents can no longer pick it.", "Delete")) {
-            await store.update({ ["breakTypes/" + bt.id]: null });
+            await store.update({ ["breakTypes/" + bt.id]: null }, "delete the break policy");
             toast("Deleted", "info");
           }
         }
@@ -520,22 +505,21 @@ function newType(state) {
       label: "Create", kind: "primary", onClick: async () => {
         const name = nm.value.trim();
         if (!name) { toast("Give it a name", "error"); return false; }
-        if (Number(mins.value) > MAX_BREAK_MINUTES) {
-          toast("Breaks cannot exceed " + MAX_BREAK_MINUTES + " minutes.", "error");
-          return false;
-        }
+        if (Number(mins.value) > MAX_BREAK_MINUTES) { toast("Breaks cannot exceed " + MAX_BREAK_MINUTES + " minutes.", "error"); return false; }
         const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 24) || store.newId("breakTypes");
         if ((state.breakTypes || {})[id]) { toast("A break type with that name already exists.", "error"); return false; }
         const order = Object.keys(state.breakTypes || {}).length + 1;
-        await store.update({
-          ["breakTypes/" + id]: {
-            id: id, name: name,
-            minutes: clampMinutes(mins.value, 15),
-            maxConcurrent: Math.max(1, Math.min(50, Number(cap.value) || 1)),
-            order: order, requiresApproval: appr.checked,
-            color: PALETTE[order % PALETTE.length], icon: ICONS[order % ICONS.length]
-          }
-        });
+        try {
+          await store.update({
+            ["breakTypes/" + id]: {
+              id: id, name: name,
+              minutes: clampMinutes(mins.value, 15),
+              maxConcurrent: Math.max(1, Math.min(50, Number(cap.value) || 1)),
+              order: order, requiresApproval: appr.checked,
+              color: PALETTE[order % PALETTE.length], icon: ICONS[order % ICONS.length]
+            }
+          }, "create the break type");
+        } catch (e) { return false; }
         await reconcile();
         toast(name + " created", "ok");
       }
@@ -543,44 +527,52 @@ function newType(state) {
   ]);
 }
 
-/* ==================== roster ==================== */
+/* ==================== roster & access ==================== */
 function rosterTab(state, now) {
   const agents = sortedAgents(state);
+  const admins = supervisors(state);
   const today = dayKey(now);
+  const open = state.settings.allowSelfEnroll !== false;
   const rows = el("tbody");
 
   for (const a of agents) {
-    const mine = listSessions(state).filter((s) => s.agentId === a.id && s.day === today);
+    const mine = listSessions(state).filter((s) => s.agentId === a.uid && s.day === today);
     const openS = mine.find((s) => [STATES.QUEUED, STATES.ACTIVE, STATES.OVER].includes(s.state));
     const used = mine.filter((s) => s.startedAt).reduce((t, s) => t + Math.max(0, (s.endedAt || now) - s.startedAt), 0);
+    const present = isPresent(state, a.uid, now);
+    const isSelf = a.uid === store.uid();
+    const lastAdmin = a.role === ROLES.ADMIN && admins.length <= 1;
+
     rows.append(el("tr", {}, [
       el("td", {}, [el("div", { class: "row" }, [
         el("span", { class: "av", style: { "--h": hueFrom(a.name) }, text: initials(a.name) }),
-        el("b", { text: a.name })
+        el("div", {}, [
+          el("b", { text: a.name + (isSelf ? " (you)" : "") }),
+          el("div", { class: "tiny", style: { textTransform: "none", letterSpacing: "0" }, text: a.email || "" })
+        ])
       ])]),
       el("td", { class: "muted", text: a.team || "—" }),
       el("td", {}, [
         el("button", {
-          class: "badge " + (a.role === ROLES.ADMIN ? "cy" : ""),
-          style: { border: "0", cursor: "pointer", font: "inherit", fontSize: "11.5px", fontWeight: "700" },
-          title: "Click to switch between agent and admin",
+          class: "role-btn badge " + (a.role === ROLES.ADMIN ? "cy" : ""),
+          title: lastAdmin ? "Keep at least one admin" : "Switch between agent and admin",
           text: a.role === ROLES.ADMIN ? "⚙ admin" : "agent",
           onclick: async () => {
             const next = a.role === ROLES.ADMIN ? ROLES.AGENT : ROLES.ADMIN;
-            if (next === ROLES.AGENT && supervisors(state).length <= 1) {
-              toast("Keep at least one admin on the roster.", "error");
-              return;
-            }
-            await store.update({ ["agents/" + a.id + "/role"]: next });
+            if (next === ROLES.AGENT && lastAdmin) { toast("Keep at least one admin on the roster.", "error"); return; }
+            if (next === ROLES.AGENT && isSelf &&
+              !(await confirmBox("Give up your own admin access?", "You'll lose this panel immediately. Another admin would have to give it back.", "Yes, step down"))) return;
+            try { await store.update({ ["agents/" + a.uid + "/role"]: next }, "change a role"); }
+            catch (e) { return; }
             toast(a.name + " is now " + (next === ROLES.ADMIN ? "an admin" : "an agent"), "ok");
           }
         })
       ]),
       el("td", {}, [
         openS
-          ? el("span", { class: "badge " + (openS.state === STATES.QUEUED ? "cy" : openS.state === STATES.OVER ? "bad" : "ok") },
-            [openS.state === STATES.QUEUED ? "in queue" : openS.state === STATES.OVER ? "over time" : "on break"])
-          : el("span", { class: "badge", text: "available" })
+          ? el("span", { class: "badge " + (openS.state === STATES.QUEUED ? "cy" : isOver(openS, now) ? "bad" : "ok") },
+            [openS.state === STATES.QUEUED ? "in queue" : isOver(openS, now) ? "over time" : "on break"])
+          : el("span", { class: "badge " + (present ? "" : "warn"), text: present ? "available" : "away" })
       ]),
       el("td", { class: "num", text: String(mine.filter((s) => s.startedAt).length) }),
       el("td", { class: "num", text: human(used) }),
@@ -588,8 +580,10 @@ function rosterTab(state, now) {
         el("button", { class: "btn sm", text: "Edit", onclick: () => editAgent(a) }),
         el("button", {
           class: "btn sm danger", text: "Remove", onclick: async () => {
-            if (await confirmBox("Remove " + a.name + "?", "Their break history stays in reports.", "Remove")) {
-              await store.update({ ["agents/" + a.id]: null });
+            if (lastAdmin) { toast("Keep at least one admin on the roster.", "error"); return; }
+            if (await confirmBox("Remove " + a.name + "?",
+              "Their break history stays in reports. If the roster is open they could sign in again and re-join.", "Remove")) {
+              await store.update({ ["agents/" + a.uid]: null }, "remove someone");
               toast("Removed", "info");
             }
           }
@@ -598,19 +592,50 @@ function rosterTab(state, now) {
     ]));
   }
 
-  const bulk = el("textarea", {
-    class: "in", rows: 4,
-    placeholder: "One per line:   Name\nor              Name, Team\nor              Name, Team, admin"
-  });
-  const admins = supervisors(state);
+  const link = location.origin + location.pathname.replace(/admin\.html$/, "index.html");
 
   return el("div", { class: "stack" }, [
     el("div", { class: "card" }, [
+      el("div", { class: "card-head" }, [el("h2", { text: "Who can get in" })]),
+      el("div", { class: "access-state " + (open ? "open" : "locked") }, [
+        el("div", { style: { flex: "1", minWidth: "220px" } }, [
+          el("b", { text: open ? "Roster is OPEN" : "Roster is LOCKED" }),
+          el("div", { class: "small muted" }, [
+            open
+              ? "Anyone who opens the link and signs in with Google joins automatically as an agent."
+              : "Only the " + agents.length + " people below can sign in. Everyone else is turned away."
+          ])
+        ]),
+        open
+          ? el("button", { class: "btn primary", text: "🔒 Lock the roster", onclick: lockRoster })
+          : el("button", {
+            class: "btn", text: "Open for new joiners", onclick: async () => {
+              if (await confirmBox("Open the roster?", "Anyone with the link and a Google account can join while it's open. Remember to lock it again.", "Open it")) {
+                await store.update({ "settings/allowSelfEnroll": true }, "open the roster");
+                toast("Roster open — lock it again when everyone's in", "info");
+              }
+            }
+          })
+      ]),
+      el("div", { class: "stack", style: { marginTop: "14px" } }, [
+        el("p", { class: "small muted", style: { margin: "0" } },
+          ["To add someone: send them the link, they sign in with their work Google account, and they appear here. You can't pre-create an account for them — the identity has to come from Google."]),
+        el("div", { class: "row wrap" }, [
+          el("code", { class: "linkbox", text: link }),
+          el("button", {
+            class: "btn sm", text: "Copy link", onclick: async () => {
+              try { await navigator.clipboard.writeText(link); toast("Link copied", "ok"); }
+              catch (e) { prompt("Copy this link:", link); }
+            }
+          })
+        ])
+      ])
+    ]),
+
+    el("div", { class: "card" }, [
       el("div", { class: "card-head" }, [
         el("h2", { text: "Roster" }),
-        el("span", { class: "tiny", text: agents.length + " people · " + admins.length + " admin" + (admins.length === 1 ? "" : "s") }),
-        el("button", { class: "btn sm", text: "＋ Add admin", onclick: () => editAgent(null, ROLES.ADMIN) }),
-        el("button", { class: "btn sm primary", text: "＋ Add agent", onclick: () => editAgent(null, ROLES.AGENT) })
+        el("span", { class: "tiny", text: agents.length + " people · " + admins.length + " admin" + (admins.length === 1 ? "" : "s") })
       ]),
       agents.length ? el("div", { class: "tbl-wrap" }, [
         el("table", { class: "tbl" }, [
@@ -620,70 +645,30 @@ function rosterTab(state, now) {
           ])]),
           rows
         ])
-      ]) : el("p", { class: "empty", text: "Nobody on the roster yet. Add people, or let agents add themselves from the agent view." })
-    ]),
-    el("div", { class: "card" }, [
-      el("div", { class: "card-head" }, [el("h2", { text: "Bulk add" })]),
-      bulk,
-      el("div", { style: { height: "10px" } }),
-      el("button", {
-        class: "btn primary", text: "Add all", onclick: async () => {
-          const lines = bulk.value.split("\n").map((l) => l.trim()).filter(Boolean);
-          if (!lines.length) return;
-          const patch = {};
-          let n = 0;
-          for (const line of lines) {
-            const [name, team, role] = line.split(",").map((x) => (x || "").trim());
-            if (!name) continue;
-            if (agents.some((a) => a.name.toLowerCase() === name.toLowerCase())) continue;
-            const id = store.newId("agents");
-            patch["agents/" + id] = {
-              id: id, name: name, team: team || "",
-              role: /^admin|supervisor$/i.test(role || "") ? ROLES.ADMIN : ROLES.AGENT,
-              createdAt: store.now()
-            };
-            n++;
-          }
-          if (!n) { toast("Nothing new to add", "info"); return; }
-          await store.update(patch);
-          bulk.value = "";
-          toast(n + " added", "ok");
-        }
-      })
+      ]) : el("p", { class: "empty", text: "Nobody has signed in yet. Share the link above." })
     ])
   ]);
 }
 
-function editAgent(a, presetRole) {
-  const nm = input({ value: a ? a.name : "", placeholder: "Full name" });
-  const tm = input({ value: a ? a.team || "" : "", placeholder: "Team / shift (optional)" });
-  const role = select(
-    [{ value: ROLES.AGENT, label: "Agent — takes breaks" },
-     { value: ROLES.ADMIN, label: "Admin — supervisor panel" }],
-    (a && a.role) || presetRole || ROLES.AGENT
-  );
-  const title = a ? "Edit " + a.name : (presetRole === ROLES.ADMIN ? "Add an admin" : "Add an agent");
-  modal(title, el("div", { class: "stack" }, [
-    field("Name", nm),
-    field("Team", tm),
-    field("Role", role, "Admins get the supervisor panel and are named in the audit trail. The panel PIN is shared.")
+function editAgent(a) {
+  const nm = input({ value: a.name, placeholder: "Full name" });
+  const tm = input({ value: a.team || "", placeholder: "Team / shift (optional)" });
+  modal("Edit " + a.name, el("div", { class: "stack" }, [
+    el("p", { class: "small dim", text: a.email || "" }),
+    field("Display name", nm),
+    field("Team", tm)
   ]), [
     { label: "Cancel", kind: "ghost" },
     {
-      label: a ? "Save" : "Add", kind: "primary", onClick: async () => {
+      label: "Save", kind: "primary", onClick: async () => {
         const name = nm.value.trim();
         if (!name) { toast("Name required", "error"); return false; }
-        const dupe = sortedAgents(store.state).some(
-          (x) => x.id !== (a && a.id) && x.name.toLowerCase() === name.toLowerCase()
-        );
-        if (dupe) { toast("Someone with that name is already on the roster.", "error"); return false; }
-        const id = a ? a.id : store.newId("agents");
-        await store.update({
-          ["agents/" + id]: {
-            id: id, name: name, team: tm.value.trim(), role: role.value,
-            createdAt: (a && a.createdAt) || store.now()
-          }
-        });
+        try {
+          await store.update({
+            ["agents/" + a.uid + "/name"]: name,
+            ["agents/" + a.uid + "/team"]: tm.value.trim()
+          }, "edit someone's details");
+        } catch (e) { return false; }
         toast("Saved", "ok");
       }
     }
@@ -779,18 +764,21 @@ function dayReport(state, day, now) {
 }
 
 function sessionRows(state, sessions, now) {
-  const head = ["Date", "Agent", "Team", "Break", "State", "Requested", "Started", "Due back", "Ended", "Planned min", "Actual min", "Over min", "Closed by"];
-  const body = sessions.sort((a, b) => (a.requestedAt || 0) - (b.requestedAt || 0)).map((s) => [
-    s.day || dayKey(s.requestedAt || now), s.agentName, s.team || "", s.breakTypeName, s.state,
-    s.requestedAt ? new Date(s.requestedAt).toLocaleString() : "",
-    s.startedAt ? new Date(s.startedAt).toLocaleString() : "",
-    s.endsAt ? new Date(s.endsAt).toLocaleString() : "",
-    s.endedAt ? new Date(s.endedAt).toLocaleString() : "",
-    s.minutes || "",
-    s.startedAt ? Math.round(Math.max(0, (s.endedAt || now) - s.startedAt) / 60000) : "",
-    s.overBy ? Math.round(s.overBy / 60000) : 0,
-    s.closedBy || ""
-  ]);
+  const head = ["Date", "Agent", "Email", "Team", "Break", "State", "Requested", "Started", "Due back", "Ended", "Planned min", "Actual min", "Over min", "Closed by"];
+  const body = sessions.sort((a, b) => (a.requestedAt || 0) - (b.requestedAt || 0)).map((s) => {
+    const rec = (state.agents || {})[s.agentId] || {};
+    return [
+      s.day || dayKey(s.requestedAt || now), s.agentName, rec.email || "", s.team || "", s.breakTypeName, s.state,
+      s.requestedAt ? new Date(s.requestedAt).toLocaleString() : "",
+      s.startedAt ? new Date(s.startedAt).toLocaleString() : "",
+      s.endsAt ? new Date(s.endsAt).toLocaleString() : "",
+      s.endedAt ? new Date(s.endedAt).toLocaleString() : "",
+      s.minutes || "",
+      s.startedAt ? Math.round(Math.max(0, (s.endedAt || now) - s.startedAt) / 60000) : "",
+      s.overBy ? Math.round(s.overBy / 60000) : 0,
+      s.closedBy || ""
+    ];
+  });
   return [head].concat(body);
 }
 
@@ -807,12 +795,8 @@ function exportAll(state) {
 /* ==================== settings ==================== */
 function settingsTab(state) {
   const team = input({ value: state.settings.teamName || "" });
-  const cap = input({ type: "number", min: "1", max: "99", value: state.settings.globalMaxConcurrent });
+  const cap = input({ type: "number", min: "1", max: "50", value: state.settings.globalMaxConcurrent });
   const grace = input({ type: "number", min: "0", max: "60", value: state.settings.graceMinutes });
-  const selfEnroll = el("input", { type: "checkbox", checked: state.settings.allowSelfEnroll !== false });
-
-  const pin1 = input({ type: "password", placeholder: "New PIN (4-8 digits)" });
-  const pin2 = input({ type: "password", placeholder: "Repeat" });
   const cfg = activeConfig();
 
   return el("div", { class: "stack" }, [
@@ -823,17 +807,16 @@ function settingsTab(state) {
         field("Max people away at once", cap, "hard ceiling across all break types"),
         field("Overtime grace (minutes)", grace, "how long an overstay keeps blocking its slot")
       ]),
-      el("div", { style: { height: "12px" } }),
-      el("label", { class: "check" }, [selfEnroll, "Let agents add themselves to the roster"]),
       el("div", { style: { height: "14px" } }),
       el("button", {
         class: "btn primary", text: "Save policy", onclick: async () => {
-          await store.update({
-            "settings/teamName": team.value.trim() || "Team",
-            "settings/globalMaxConcurrent": Math.max(1, Number(cap.value) || 1),
-            "settings/graceMinutes": Math.max(0, Number(grace.value) || 0),
-            "settings/allowSelfEnroll": selfEnroll.checked
-          });
+          try {
+            await store.update({
+              "settings/teamName": team.value.trim() || "Team",
+              "settings/globalMaxConcurrent": Math.max(1, Math.min(50, Number(cap.value) || 1)),
+              "settings/graceMinutes": Math.max(0, Number(grace.value) || 0)
+            }, "save the floor policy");
+          } catch (e) { return; }
           await reconcile();
           toast("Policy saved", "ok");
         }
@@ -841,19 +824,13 @@ function settingsTab(state) {
     ]),
 
     el("div", { class: "card" }, [
-      el("div", { class: "card-head" }, [el("h2", { text: "Admin PIN" })]),
-      el("div", { class: "inline-fields" }, [field("New PIN", pin1), field("Confirm", pin2)]),
-      el("div", { style: { height: "12px" } }),
-      el("button", {
-        class: "btn", text: "Change PIN", onclick: async () => {
-          const a = pin1.value.trim();
-          if (a.length < 4) { toast("Use at least 4 digits", "error"); return; }
-          if (a !== pin2.value.trim()) { toast("PINs do not match", "error"); return; }
-          await store.update({ "settings/adminPinHash": await sha256(a) });
-          pin1.value = pin2.value = "";
-          toast("PIN changed", "ok");
-        }
-      })
+      el("div", { class: "card-head" }, [el("h2", { text: "Sign-in & access" })]),
+      el("p", { class: "muted small" }, [
+        "Everyone signs in with Google. The database rules only let a person create or change their own break — a colleague can't start, extend or close it, and a closed break can't be rewritten. Admins can do all of it, and their name is recorded on every override."
+      ]),
+      el("div", { class: "btn-row" }, [
+        el("button", { class: "btn", text: "Roster & access", onclick: () => { tab = "roster"; location.hash = "roster"; render(); } })
+      ])
     ]),
 
     el("div", { class: "card" }, [
@@ -861,7 +838,7 @@ function settingsTab(state) {
       el("p", { class: "muted small" }, [
         store.mode === "firebase"
           ? "Live shared database: " + (cfg && cfg.databaseURL ? cfg.databaseURL : "connected")
-          : "No shared database - this browser only. Connect Firebase so the whole team sees one board."
+          : "No shared database — this browser only."
       ]),
       el("div", { class: "btn-row" }, [
         el("button", { class: "btn", text: "Configure database", onclick: () => setupDialog() }),
@@ -877,7 +854,7 @@ function settingsTab(state) {
 
     el("div", { class: "card" }, [
       el("div", { class: "card-head" }, [el("h2", { text: "Housekeeping" })]),
-      el("p", { class: "muted small", text: "Break history is kept forever so reports stay accurate. Trim it when it gets large." }),
+      el("p", { class: "muted small", text: "Break history is kept so reports stay accurate. Trim it when it gets large." }),
       el("div", { class: "btn-row" }, [
         el("button", {
           class: "btn danger", text: "Delete history older than 30 days", onclick: async () => {
@@ -887,7 +864,7 @@ function settingsTab(state) {
             if (!(await confirmBox("Delete " + old.length + " old records?", "This cannot be undone. Export a CSV first if you need it.", "Delete"))) return;
             const patch = {};
             for (const s of old) patch["sessions/" + s.id] = null;
-            await store.update(patch);
+            await store.update(patch, "delete old history");
             toast(old.length + " records deleted", "ok");
           }
         }),
@@ -926,7 +903,7 @@ function tickClocks(now) {
 
 function watchOverstays(now) {
   for (const s of listSessions(store.state)) {
-    if (s.state !== STATES.OVER) continue;
+    if (!isOver(s, now) || s.state === STATES.QUEUED) continue;
     if (alerted[s.id]) continue;
     alerted[s.id] = true;
     beep("warn");
