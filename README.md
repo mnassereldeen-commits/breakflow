@@ -7,8 +7,9 @@ either go straight away or join a queue that promotes them automatically when a 
 with a big countdown of exactly how much time is left. The admin gets a live board, hard
 limits on how many people can be away at once, overstay alerts, and CSV reports.
 
-No build step, no server, no accounts to sign up for, nothing to configure. It's a static
-site plus the browser's own storage.
+No build step, no accounts to sign up for as an agent. It's a static site (GitHub Pages)
+backed by a shared Firebase Realtime Database, so everyone sees the same live board no
+matter which PC they sign in from.
 
 ## The two links
 
@@ -23,22 +24,21 @@ they're told it's for admins and pointed back.
 
 ---
 
-## Read this first: it's one computer
+## Read this first: one shared board, every PC
 
-Everything BreakFlow stores lives in **the browser it runs in**. There is no server behind
-it, because GitHub Pages only serves files.
+Accounts, break policies and the live queue all live in **one Firebase project**, synced to
+every device that opens the site. That means:
 
-That means:
+- Anyone with the site links and an account can sign in from **their own PC, laptop, or
+  phone** and see the same live board as everyone else.
+- Signing out on one machine doesn't sign you out anywhere else — each device tracks its own
+  signed-in session locally, same as any normal site.
+- **Take backups anyway.** Admin → Settings → Download backup. The data lives in Firebase, not
+  in any one browser, but a deleted project or a wiped database is still unrecoverable
+  without one.
 
-- Set it up on **the PC the team will actually use** — a break-board machine on the floor, a
-  shared terminal, a wall display. Everyone signs in on that machine.
-- An agent opening the site on their own laptop or phone gets a **completely separate, empty**
-  app with its own accounts. They won't see the team's board.
-- **Take backups.** Admin → Settings → Download backup. If someone clears that browser's site
-  data, or the PC is replaced, everything is gone.
-
-If you later want agents on their own devices seeing one shared board, that needs a database
-behind it — a different build.
+This needs a one-time setup step a purely static site doesn't: creating the free Firebase
+project the data lives in. See **Setup** below.
 
 ## What it does
 
@@ -67,19 +67,54 @@ Every approval, denial, override and forced close is recorded under the admin's 
 
 ## Setup
 
-The owner's admin account already exists — username **`murad`** — so there is no setup
-screen. On the break-board PC:
+### 1. Create the Firebase project (one time only)
 
-1. Open the **supervisor link** and sign in as `murad`.
+The site needs somewhere to keep the shared data. This takes about five minutes and is free
+for a team this size.
+
+1. Go to the [Firebase console](https://console.firebase.google.com/), **Add project**, give
+   it any name.
+2. On the project overview page, click the **`</>`** (web app) icon → register an app (any
+   nickname) → it shows you a `firebaseConfig` object. Keep that page open.
+3. **Build → Authentication → Get started → Sign-in method** → enable **Anonymous** → Save.
+   This is *not* how agents sign in — it just lets the site connect to the database at all.
+   Nobody on the team needs a Google account or ever sees this.
+4. **Build → Realtime Database → Create Database** → pick a region → start in **locked mode**.
+5. Still on the Realtime Database page, open the **Rules** tab, replace the contents with:
+
+   ```json
+   {
+     "rules": {
+       "breakflow": {
+         ".read": "auth != null",
+         ".write": "auth != null"
+       }
+     }
+   }
+   ```
+
+   → **Publish**. This lets anyone who has loaded the site (and so is anonymously signed in)
+   read and write the shared data — the same "floor tool, not a bank vault" trust level the
+   rest of this README already describes for passwords.
+6. Paste the `firebaseConfig` values from step 2 into `FIREBASE_CONFIG` in
+   [`assets/js/config.js`](assets/js/config.js), commit, and push. `FIREBASE_CONFIG` is not a
+   secret — it just names which project to talk to; the Rules above are what actually control
+   access.
+
+### 2. Set up the team
+
+The owner's admin account already exists — username **`murad`** — so there is no "create the
+first admin" screen once the database above is in place.
+
+1. Open the **supervisor link** on any PC and sign in as `murad`.
 2. **Change the password straight away.** A banner at the top of the panel nags you until you
    do, because the starter password ships with the site and anyone reading the code could
    work it out.
 3. **Accounts → ＋ Add agent** for each person. A password is suggested; you're shown their
-   username and password once with a **Copy both** button. Hand them over.
+   username and password once with a **Copy both** button. Hand them over — each person signs
+   in from wherever they normally work.
 4. Tune **Break policies** and the **floor cap** if the defaults don't fit.
-5. **Bookmark both links on that PC** and take a backup from Settings.
-
-Nothing else. No Firebase, no Google, no API keys.
+5. Take a backup from Settings.
 
 ### How the seeded account works
 
@@ -130,9 +165,10 @@ What that does and doesn't buy you:
 
 - **Does:** stop agents acting as each other. You need someone's password to start, extend or
   close their break, and every action carries a name.
-- **Doesn't:** stand up to someone with developer tools on that PC. With no server, the data
-  and the code are both on the machine, so a determined person could edit storage directly.
-  Lock the PC down the way you'd lock down any shared terminal.
+- **Doesn't:** stand up to a determined attacker. The Realtime Database rules only check that
+  a request is anonymously signed in, not which account it claims to be — so anyone with
+  developer tools and the (public) Firebase config could read or write the database directly,
+  the same way anyone with developer tools could edit localStorage in the single-PC version.
 - The admin panel is a UI gate on the account's role, not enforced by anything deeper.
 
 Treat it as a floor tool. Keep it to names, break types and timestamps.
@@ -140,15 +176,18 @@ Treat it as a floor tool. Keep it to names, break types and timestamps.
 ## Backups
 
 Settings → **Download backup** gives you a JSON file with accounts, break policies and full
-history. **Restore from backup** replaces everything on the PC with a file's contents (it
-signs you out afterwards, and restored passwords keep working).
+history. **Restore from backup** replaces everything on the shared board — every PC, not just
+the one doing the restore — with a file's contents (it signs you out afterwards, and restored
+passwords keep working).
 
-This is also how you move to a new machine: back up on the old one, restore on the new one.
+This is also how you'd move to a new Firebase project: back up on the old one, restore on the
+new one after pointing `FIREBASE_CONFIG` at it.
 
 ## Running it elsewhere
 
-It's a static site — any host works, or a folder on the PC. Locally you need `http://`
-because it uses ES modules, so serve it rather than opening the file:
+It's a static site — any host works, or a folder on the PC, as long as `assets/js/config.js`
+points at your Firebase project. Locally you need `http://` because it uses ES modules, so
+serve it rather than opening the file:
 
 ```bash
 python -m http.server 8080
@@ -163,11 +202,12 @@ For GitHub Pages: push to `main`, then **Settings → Pages → Deploy from a br
 | --- | --- |
 | `index.html` | Agent view |
 | `admin.html` | Supervisor panel |
-| `assets/js/store.js` | Accounts, passwords, storage and the queue engine |
+| `assets/js/store.js` | Accounts, passwords, the shared database and the queue engine |
+| `assets/js/firebase.js` | Firebase connection (anonymous sign-in, database read/write) |
 | `assets/js/agent.js` | Agent UI |
 | `assets/js/admin.js` | Admin UI |
 | `assets/js/common.js` | Shared UI (sign-in, modals, toasts, sound, CSV…) |
-| `assets/js/config.js` | Shipped defaults for a fresh install |
+| `assets/js/config.js` | Firebase project config + shipped defaults for a fresh database |
 | `assets/css/app.css` | Design system |
 
 ## Licence

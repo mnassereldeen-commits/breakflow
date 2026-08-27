@@ -1,10 +1,11 @@
 /* ============================================================
    BreakFlow - supervisor panel
 
-   You get in because your account's role is admin. There is no
-   server, so that is a UI gate, not real security - anyone with
-   developer tools on this PC can reach the stored data directly.
-   Fine for a floor board; don't treat it as more than that.
+   You get in because your account's role is admin. That's a UI gate
+   on data that lives in the shared Firebase project, not real
+   security - anyone with developer tools and the (public) Firebase
+   config can reach the database directly. Fine for a floor board;
+   don't treat it as more than that.
    ============================================================ */
 
 import {
@@ -18,7 +19,7 @@ import {
   $, el, mmss, hhmm, human, toast, modal, confirmBox, field, input, select,
   mountStatusPill, mountClock, setFavicon, initials, hueFrom,
   csv, download, beep, notify, askNotify, mountErrorToasts, mountKioskTimer,
-  signInGate, setupGate, noStorageGate, identityChip, storageDialog, changePasswordDialog
+  signInGate, setupGate, noStorageGate, noConnectionGate, identityChip, storageDialog, changePasswordDialog
 } from "./common.js";
 
 let tab = location.hash.replace("#", "") || "live";
@@ -58,6 +59,7 @@ function render() {
   identityChip($("#idHost"));
 
   if (store.access === "no-storage") { main.append(noStorageGate()); return; }
+  if (store.access === "no-connection") { main.append(noConnectionGate()); return; }
   if (store.access === "setup") { main.append(setupGate()); return; }
   if (store.access !== "ok" || !store.user) { main.append(signInGate(state.settings.teamName, "admin")); return; }
   if (!isAdmin()) { main.append(notAdmin()); return; }
@@ -835,7 +837,7 @@ function settingsTab(state) {
     el("div", { class: "card" }, [
       el("div", { class: "card-head" }, [el("h2", { text: "Backup" })]),
       el("div", { class: "callout" }, [
-        "⚠ Everything lives in this browser. If someone clears this PC's site data, or the machine is replaced, ",
+        "⚠ Everything lives in the team's shared Firebase project. If the project is deleted or its data is wiped, ",
         el("b", { text: "it is all gone" }), ". Download a backup regularly — accounts, breaks and history are all in the file."
       ]),
       el("div", { class: "btn-row", style: { marginTop: "12px" } }, [
@@ -876,9 +878,9 @@ function settingsTab(state) {
         }),
         el("button", {
           class: "btn danger", text: "Erase everything", onclick: async () => {
-            if (!(await confirmBox("Erase all BreakFlow data on this PC?",
-              "Accounts, breaks and history. There is no undo — download a backup first.", "Erase everything"))) return;
-            store.wipeEverything();
+            if (!(await confirmBox("Erase the shared board for the whole team?",
+              "Accounts, breaks and history — gone on every PC, not just this one. There is no undo — download a backup first.", "Erase everything"))) return;
+            await store.wipeEverything();
             location.reload();
           }
         })
@@ -891,7 +893,7 @@ function restoreDialog() {
   const file = el("input", { type: "file", accept: ".json,application/json", class: "in" });
   modal("Restore from backup", el("div", { class: "stack" }, [
     el("div", { class: "callout" }, [
-      "⚠ This replaces everything currently on this PC — accounts, breaks and history — with the contents of the file."
+      "⚠ This replaces everything on the shared board — accounts, breaks and history, for every PC on the team — with the contents of the file."
     ]),
     field("Backup file", file)
   ]), [
@@ -902,7 +904,7 @@ function restoreDialog() {
         if (!f) { toast("Choose a backup file.", "error"); return false; }
         let text;
         try { text = await f.text(); } catch (e) { toast("Couldn't read that file.", "error"); return false; }
-        try { store.importJSON(text); }
+        try { await store.importJSON(text); }
         catch (e) { toast(e.message, "error"); return false; }
         toast("Restored. Sign in again.", "ok");
         setTimeout(() => location.reload(), 700);

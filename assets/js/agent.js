@@ -12,7 +12,7 @@ import {
   $, el, mmss, hhmm, human, toast, modal, beep, askNotify, notify,
   flashTitle, stopFlash, setBaseTitle, mountStatusPill, mountClock, setFavicon,
   initials, hueFrom, confirmBox, mountErrorToasts, mountKioskTimer,
-  signInGate, setupGate, noStorageGate, identityChip
+  signInGate, setupGate, noStorageGate, noConnectionGate, identityChip
 } from "./common.js";
 
 const RING_R = 110;
@@ -57,6 +57,7 @@ function render() {
   identityChip($("#idHost"));
 
   if (store.access === "no-storage") { main.append(noStorageGate()); return; }
+  if (store.access === "no-connection") { main.append(noConnectionGate()); return; }
   if (store.access === "setup") { main.append(setupGate()); return; }
   if (store.access !== "ok" || !me()) { main.append(signInGate(state.settings.teamName, "agent")); return; }
 
