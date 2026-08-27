@@ -67,31 +67,12 @@ export function toast(msg, kind) {
 }
 
 /* ---------- modal --------------------------------------------------- */
-/* Tracked so the kiosk timer can tell "idle" from "filling in a form",
-   and so a sign-out can never leave a dialog stranded on top of the
-   login screen looking like it still works. */
-const openModals = new Set();
-
-/* Read the DOM rather than trust the set: a dialog removed by other
-   means would otherwise leave a phantom entry behind and disable the
-   kiosk timer for good. */
-export function anyModalOpen() {
-  return !!document.querySelector(".modal-wrap:not(.out)");
-}
-export function closeAllModals() {
-  for (const c of Array.from(openModals)) c();
-  openModals.clear();
-  document.querySelectorAll(".modal-wrap").forEach((n) => n.remove());
-}
-
 export function modal(title, bodyNode, actions) {
   const wrap = el("div", { class: "modal-wrap" });
   const close = () => {
-    openModals.delete(close);
     wrap.classList.add("out");
     setTimeout(() => wrap.remove(), 200);
   };
-  openModals.add(close);
   const foot = el("div", { class: "modal-foot" });
   for (const a of actions || []) {
     foot.append(el("button", {
@@ -261,7 +242,7 @@ export function identityChip(host) {
     u.role === ROLES.ADMIN ? el("span", { class: "badge cy", text: "admin" }) : null
   ]));
   host.append(el("button", {
-    class: "pill signout", title: "Sign out so the next person can use this PC",
+    class: "pill signout", title: "Sign out",
     onclick: () => store.signOut()
   }, ["Sign out"]));
 }
@@ -479,34 +460,6 @@ export function setupGate() {
   ]);
 }
 
-/* ---------- kiosk auto sign-out ------------------------------------- */
-export function mountKioskTimer() {
-  const bump = () => store.touch();
-  for (const ev of ["click", "keydown", "touchstart", "mousemove"]) {
-    addEventListener(ev, bump, { passive: true });
-  }
-  store.touch();
-
-  /* Whenever the signed-in user goes away, take any open dialog with
-     them and say so - a silent swap to the login screen behind a form
-     that still looks live is how work gets lost. */
-  let had = !!store.user;
-  store.onStatus(({ user }) => {
-    if (had && !user) {
-      closeAllModals();
-      toast("Signed out — the screen was left idle. Sign in again to carry on.", "error");
-    }
-    had = !!user;
-  });
-
-  setInterval(() => {
-    const secs = Number(store.state.settings.kioskTimeoutSec || 0);
-    if (!secs || !store.user) return;
-    /* someone mid-form is working, not idle */
-    if (anyModalOpen()) { store.touch(); return; }
-    if (Date.now() - store.lastActive() > secs * 1000) store.signOut();
-  }, 5000);
-}
 
 /* ---------- status pill -------------------------------------------- */
 export function mountStatusPill(host) {

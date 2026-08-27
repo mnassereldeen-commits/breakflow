@@ -9,9 +9,6 @@
    `minutes`        : length of the break. Hard capped at 60 (one hour).
    `maxConcurrent`  : how many people may be on THIS break at once.
    `globalMaxConcurrent` : ceiling across every break type combined.
-   `kioskTimeoutSec`: sign the current person out after this many
-                      seconds of no clicking, so the next agent gets a
-                      clean login screen. 0 turns it off.
    ============================================================ */
 
 /* ------------------------------------------------------------------
@@ -50,15 +47,14 @@ export const SEED_ADMIN = {
   name: "Murad Nassereldeen",
   username: "murad",
   team: "",
-  salt: "94bd93b9f6aef24a48d6733d7d306d65",
-  hash: "a1130cdabc99326aa113499563b7307b0dc0c6c8f59f01bf53e0c3b02c189723"
+  salt: "4bc8d5f35ea8f1a96c98e9dac9ce9c9a",
+  hash: "cbb1034866eff26e40263d69fcc89de2beeb541c5134eeedc6dc742c8cc4e927"
 };
 
 export const DEFAULTS = {
   teamName: "Operations Floor",
   globalMaxConcurrent: 3,
   graceMinutes: 3,
-  kioskTimeoutSec: 120,
   breakTypes: {
     bio:   { id: "bio",   name: "Bio Break",  minutes: 5,  maxConcurrent: 2, color: "#38bdf8", icon: "\u{1F6BB}", requiresApproval: false, order: 1 },
     short: { id: "short", name: "Short Break",minutes: 15, maxConcurrent: 2, color: "#a78bfa", icon: "\u{2615}",  requiresApproval: false, order: 2 },

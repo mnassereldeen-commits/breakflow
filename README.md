@@ -61,7 +61,7 @@ project the data lives in. See **Setup** below.
 - **Break policies** — name, minutes (1–60), how many at once, colour, icon, whether it needs approval.
 - **Accounts** — create agents and admins, edit them, flip anyone between roles, and **set a new password for anybody** when they forget theirs.
 - **Reports** — per-day, per-agent: breaks taken, total time out, average, overstays, breakdown by type. CSV for a day or all history, plus a print view.
-- **Settings** — team name, floor cap, overtime grace, auto sign-out, backup/restore, housekeeping.
+- **Settings** — team name, floor cap, overtime grace, backup/restore, housekeeping.
 
 Every approval, denial, override and forced close is recorded under the admin's name.
 
@@ -128,14 +128,11 @@ To seed a different owner: sign in, create the account you want on the Accounts 
 a backup, and copy that account's `salt` and `hash` into `SEED_ADMIN`. Set it to `null` to get
 a "create the first admin" setup screen instead.
 
-### Auto sign-out (on by default, 120 seconds)
+### Staying signed in
 
-On a shared machine you want the login screen back after each person. BreakFlow signs the
-current user out after two minutes without a click, so the next agent gets a clean slate.
-Running breaks keep their timers — the agent signs back in to tap *I'm back*.
-
-Change it in **Settings → Auto sign-out**, or set `0` to stay signed in (right for a
-single-user desk or a wall display).
+Signing in keeps you signed in on that browser until you sign out yourself, or close the
+browser (or that tab) - there's no idle timeout or "kiosk mode." Each device tracks its own
+session independently, so signing out on one PC doesn't touch anyone else's.
 
 ## How the queue works
 
