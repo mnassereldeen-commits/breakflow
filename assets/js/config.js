@@ -16,6 +16,14 @@
                       clean login screen. 0 turns it off.
    ============================================================ */
 
+/* The setup screen is pre-filled with this, so the owner only has to
+   choose a password. Never put a real password in here - this file is
+   published with the site, and anyone can read it. */
+export const SEED_ADMIN = {
+  name: "Murad Nassereldeen",
+  username: "murad"
+};
+
 export const DEFAULTS = {
   teamName: "Operations Floor",
   globalMaxConcurrent: 3,

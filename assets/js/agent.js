@@ -57,7 +57,7 @@ function render() {
   identityChip($("#idHost"));
 
   if (store.access === "setup") { main.append(setupGate()); return; }
-  if (store.access !== "ok" || !me()) { main.append(signInGate(state.settings.teamName)); return; }
+  if (store.access !== "ok" || !me()) { main.append(signInGate(state.settings.teamName, "agent")); return; }
 
   const now = store.now();
   const mine = mySession(state, store.uid());

@@ -437,3 +437,21 @@ footer.foot { text-align: center; color: var(--ink-3); font-size: 12px; padding:
 .creds { display: grid; gap: 10px; padding: 14px; border-radius: 12px; background: rgba(34,211,238,.07); border: 1px solid rgba(34,211,238,.3); }
 .creds > div { display: grid; gap: 2px; }
 .creds b { font-family: var(--mono); font-size: 18px; letter-spacing: .01em; user-select: all; }
+
+/* ---------- agent / supervisor switch on the login page ---------- */
+.seg { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.seg-btn {
+  display: grid; gap: 1px; padding: 11px 12px; border-radius: 12px;
+  border: 1px solid var(--line-2); background: rgba(148,163,184,.06);
+  text-align: center; text-decoration: none; color: var(--ink-2);
+  transition: border-color .15s, background .15s, color .15s;
+}
+.seg-btn:hover { border-color: var(--accent); color: var(--ink); background: rgba(34,211,238,.08); }
+.seg-btn b { font-size: 14px; font-weight: 650; }
+.seg-btn span { font-size: 11px; color: var(--ink-3); }
+.seg-btn.on {
+  border-color: var(--accent); color: var(--ink);
+  background: rgba(34,211,238,.13);
+  box-shadow: inset 0 0 0 1px rgba(34,211,238,.28);
+}
+.seg-btn.on span { color: #67e8f9; }

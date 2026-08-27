@@ -3,6 +3,7 @@
    ============================================================ */
 
 import { store, ROLES, normUsername } from "./store.js";
+import { SEED_ADMIN } from "./config.js";
 /* ---------- DOM ----------------------------------------------------- */
 export const $ = (sel, root) => (root || document).querySelector(sel);
 export const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
@@ -291,11 +292,25 @@ export function changePasswordDialog() {
 }
 
 /* ---------- sign in ------------------------------------------------- */
-export function signInGate(teamName) {
+/**
+ * mode: "agent" on index.html, "admin" on admin.html. Both show the
+ * same two links so anyone who lands on the wrong one can switch.
+ */
+export function signInGate(teamName, mode) {
+  const isAdminSide = mode === "admin";
   const user = input({ placeholder: "Username", autocapitalize: "none", autocorrect: "off", spellcheck: "false", autocomplete: "username" });
   const pass = input({ type: "password", placeholder: "Password", autocomplete: "current-password" });
   const msg = el("p", { class: "small err", style: { minHeight: "18px", margin: "4px 0 0" } });
-  const btn = el("button", { class: "btn lg primary block", text: "Sign in" });
+  const btn = el("button", { class: "btn lg primary block", text: isAdminSide ? "Sign in as supervisor" : "Sign in" });
+
+  const seg = el("div", { class: "seg" }, [
+    el("a", { class: "seg-btn" + (isAdminSide ? "" : " on"), href: "index.html" }, [
+      el("b", { text: "Agent" }), el("span", { text: "take a break" })
+    ]),
+    el("a", { class: "seg-btn" + (isAdminSide ? " on" : ""), href: "admin.html" }, [
+      el("b", { text: "Supervisor" }), el("span", { text: "manage the floor" })
+    ])
+  ]);
 
   const go = async () => {
     if (!user.value.trim() || !pass.value) { msg.textContent = "Enter your username and password."; return; }
@@ -312,16 +327,23 @@ export function signInGate(teamName) {
   btn.addEventListener("click", go);
   for (const f of [user, pass]) f.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
 
-  const card = el("div", { class: "card pad-lg", style: { maxWidth: "400px" } }, [
+  const card = el("div", { class: "card pad-lg", style: { maxWidth: "420px" } }, [
     el("div", { class: "center" }, [
       el("div", { class: "mark big", text: "B" }),
       el("h2", { text: teamName || "BreakFlow" }),
-      el("p", { class: "muted small", style: { margin: "8px 0 20px" } },
-        ["Sign in to take your break. Only you can start or end your own."])
+      el("p", { class: "muted small", style: { margin: "8px 0 18px" } }, [
+        isAdminSide
+          ? "Supervisor panel — the live board, accounts and reports."
+          : "Sign in to take your break. Only you can start or end your own."
+      ])
     ]),
-    el("div", { class: "stack", style: { gap: "10px" } }, [user, pass, btn, msg]),
-    el("p", { class: "small dim center", style: { marginTop: "16px", marginBottom: "0" } },
-      ["Your supervisor gives you your username and password."])
+    seg,
+    el("div", { class: "stack", style: { gap: "10px", marginTop: "16px" } }, [user, pass, btn, msg]),
+    el("p", { class: "small dim center", style: { marginTop: "14px", marginBottom: "0" } }, [
+      isAdminSide
+        ? "Only accounts with the admin role can open this panel."
+        : "Your supervisor gives you your username and password."
+    ])
   ]);
   setTimeout(() => user.focus(), 80);
   return el("div", { class: "gate" }, [card]);
@@ -329,9 +351,9 @@ export function signInGate(teamName) {
 
 /* ---------- first run ----------------------------------------------- */
 export function setupGate() {
-  const name = input({ placeholder: "Your full name" });
-  const user = input({ placeholder: "Username, e.g. murad", autocapitalize: "none", spellcheck: "false" });
-  const p1 = input({ type: "password", placeholder: "Password" });
+  const name = input({ placeholder: "Your full name", value: SEED_ADMIN.name });
+  const user = input({ placeholder: "Username", autocapitalize: "none", spellcheck: "false", value: SEED_ADMIN.username });
+  const p1 = input({ type: "password", placeholder: "Choose a password" });
   const p2 = input({ type: "password", placeholder: "Repeat password" });
   const msg = el("p", { class: "small err", style: { minHeight: "18px", margin: "0" } });
 

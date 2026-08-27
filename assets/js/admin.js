@@ -58,7 +58,7 @@ function render() {
   identityChip($("#idHost"));
 
   if (store.access === "setup") { main.append(setupGate()); return; }
-  if (store.access !== "ok" || !store.user) { main.append(signInGate(state.settings.teamName)); return; }
+  if (store.access !== "ok" || !store.user) { main.append(signInGate(state.settings.teamName, "admin")); return; }
   if (!isAdmin()) { main.append(notAdmin()); return; }
 
   const nav = el("div", { class: "tabs" });
