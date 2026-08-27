@@ -2,11 +2,7 @@
    BreakFlow - shared UI helpers
    ============================================================ */
 
-import {
-  store, saveConfig, clearConfig, activeConfig, encodeConfig,
-  isAdminAgent, displayLogin, isSyntheticEmail
-} from "./store.js";
-
+import { store, ROLES, normUsername } from "./store.js";
 /* ---------- DOM ----------------------------------------------------- */
 export const $ = (sel, root) => (root || document).querySelector(sel);
 export const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
@@ -185,277 +181,6 @@ export function stopFlash() {
 }
 export function setBaseTitle(t) { baseTitle = t; if (!flashTimer) document.title = t; }
 
-/* ---------- connection pill ---------------------------------------- */
-export function mountStatusPill(host) {
-  const dot = el("span", { class: "dot" });
-  const label = el("span", { class: "lbl" });
-  const pill = el("button", { class: "pill", title: "Data connection" }, [dot, label]);
-  pill.addEventListener("click", () => setupDialog());
-  host.append(pill);
-  store.onStatus(({ mode, online }) => {
-    pill.classList.remove("ok", "warn", "bad");
-    if (mode === "firebase" && online) { pill.classList.add("ok"); label.textContent = "Live"; }
-    else if (mode === "firebase") { pill.classList.add("warn"); label.textContent = "Reconnecting"; }
-    else if (mode === "local") { pill.classList.add("warn"); label.textContent = "This device only"; }
-    else { pill.classList.add("bad"); label.textContent = "Not connected"; }
-  });
-  return pill;
-}
-
-/* ---------- write failures become visible -------------------------- */
-export function mountErrorToasts() {
-  store.onError(({ what, denied, error }) => {
-    if (denied) toast("Not allowed: you can't " + (what || "do that") + ". Only your own break is yours to change.", "error");
-    else toast("Couldn't " + (what || "save") + ": " + (error && (error.message || error.code) || "unknown error"), "error");
-  });
-}
-
-/* ---------- sign-in ------------------------------------------------ */
-function signInHelp(err) {
-  const code = (err && err.code) || "";
-  if (/wrong-password|invalid-credential|invalid-login/.test(code)) return "Wrong username or password.";
-  if (/user-not-found/.test(code)) return "No account with that username. Ask your supervisor to create one.";
-  if (/too-many-requests/.test(code)) return "Too many attempts. Wait a minute and try again.";
-  if (/user-disabled/.test(code)) return "That account has been disabled.";
-  if (/network-request-failed/.test(code)) return "No connection to the server.";
-  if (/operation-not-allowed/.test(code)) {
-    return "Email/password sign-in isn't switched on in this Firebase project yet (Authentication → Sign-in method).";
-  }
-  if (/unauthorized-domain/.test(code)) {
-    return "This site isn't on Firebase's authorised-domain list. Add " + location.hostname +
-      " under Authentication → Settings → Authorized domains.";
-  }
-  if (/weak-password/.test(code)) return "Password must be at least 6 characters.";
-  if (/email-already-in-use/.test(code)) return "That username is already taken.";
-  return (err && err.message) || code || "Something went wrong.";
-}
-export { signInHelp };
-
-/** Full-page sign-in. Username + password, created by a supervisor. */
-export function signInGate(teamName) {
-  const user = input({ placeholder: "Username", autocapitalize: "none", autocorrect: "off", spellcheck: "false", autocomplete: "username" });
-  const pass = input({ type: "password", placeholder: "Password", autocomplete: "current-password" });
-  const msg = el("p", { class: "small err", style: { minHeight: "18px", margin: "4px 0 0" } });
-  const btn = el("button", { class: "btn lg primary block", text: "Sign in" });
-
-  const go = async () => {
-    const u = user.value.trim();
-    if (!u || !pass.value) { msg.textContent = "Enter your username and password."; return; }
-    btn.disabled = true;
-    msg.textContent = "";
-    try {
-      await store.signIn(u, pass.value);
-    } catch (err) {
-      msg.textContent = signInHelp(err);
-      pass.value = "";
-      pass.focus();
-    } finally { btn.disabled = false; }
-  };
-  btn.addEventListener("click", go);
-  for (const f of [user, pass]) f.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
-
-  const card = el("div", { class: "card pad-lg", style: { maxWidth: "400px" } }, [
-    el("div", { class: "center" }, [
-      el("div", { class: "mark big", text: "B" }),
-      el("h2", { text: teamName || "BreakFlow" }),
-      el("p", { class: "muted small", style: { margin: "8px 0 20px" } },
-        ["Sign in to take your breaks. Only you can start or end your own."])
-    ]),
-    el("div", { class: "stack", style: { gap: "10px" } }, [user, pass, btn, msg]),
-    el("p", { class: "small dim center", style: { marginTop: "16px", marginBottom: "0" } },
-      ["Your supervisor creates your username and password."])
-  ]);
-
-  const wrap = el("div", { class: "gate" }, [card]);
-  setTimeout(() => user.focus(), 80);
-
-  /* On a brand-new database, offer to create the owner account. */
-  store.setupDone().then((done) => {
-    if (done) return;
-    card.append(el("p", { class: "small center", style: { marginTop: "14px", marginBottom: "0" } }, [
-      el("a", {
-        href: "#", text: "First time here? Set up this board →",
-        onclick: (e) => { e.preventDefault(); firstAdminDialog(); }
-      })
-    ]));
-  });
-  return wrap;
-}
-
-/** One-time owner setup on a fresh database. */
-function firstAdminDialog() {
-  const name = input({ placeholder: "Your full name" });
-  const user = input({ placeholder: "Username, e.g. murad", autocapitalize: "none", spellcheck: "false" });
-  const p1 = input({ type: "password", placeholder: "Password (6+ characters)" });
-  const p2 = input({ type: "password", placeholder: "Repeat password" });
-
-  modal("Set up this board", el("div", { class: "stack" }, [
-    el("p", { class: "muted small" },
-      ["This creates the first supervisor account and claims the board. It can only be done once, so do it yourself before sharing the link."]),
-    field("Your name", name),
-    field("Username", user, "You can use a plain username, or a real email address if you'd like password-reset emails to work."),
-    field("Password", p1),
-    field("Confirm password", p2)
-  ]), [
-    { label: "Cancel", kind: "ghost" },
-    {
-      label: "Create supervisor account", kind: "primary", onClick: async () => {
-        if (!name.value.trim()) { toast("Enter your name.", "error"); return false; }
-        if (!user.value.trim()) { toast("Choose a username.", "error"); return false; }
-        if (p1.value.length < 6) { toast("Password must be at least 6 characters.", "error"); return false; }
-        if (p1.value !== p2.value) { toast("Passwords don't match.", "error"); return false; }
-        try {
-          await store.createFirstAdmin(user.value.trim(), name.value.trim(), p1.value);
-          toast("Welcome. You're the supervisor for this board.", "ok");
-        } catch (err) { toast(signInHelp(err), "error"); return false; }
-      }
-    }
-  ]);
-}
-
-/** Signed in to Firebase, but no roster record - shouldn't normally happen. */
-export function noAccountGate(user) {
-  return el("div", { class: "gate" }, [
-    el("div", { class: "card pad-lg center", style: { maxWidth: "460px" } }, [
-      el("h2", { text: "This account isn't set up" }),
-      el("p", { class: "muted", style: { margin: "10px 0 6px" } }, [
-        "You signed in as ", el("b", { text: displayLogin((user && user.email) || "") || "this account" }),
-        ", but there's no agent profile attached to it."
-      ]),
-      el("p", { class: "small dim", style: { marginBottom: "18px" } },
-        ["Ask your supervisor to create your account, then sign in with the username and password they give you."]),
-      el("div", { class: "btn-row", style: { justifyContent: "center" } }, [
-        el("button", { class: "btn", text: "Try again", onclick: () => location.reload() }),
-        el("button", { class: "btn ghost", text: "Sign out", onclick: () => store.signOut().then(() => location.reload()) })
-      ])
-    ])
-  ]);
-}
-
-/** Header chip: avatar, name, sign out. */
-export function identityChip(host, opts) {
-  host.innerHTML = "";
-  const u = store.user;
-  const m = store.member;
-  if (!u) return;
-  const name = (m && m.name) || u.name || u.email;
-  const av = u.photo
-    ? el("img", { class: "av img", src: u.photo, alt: "", referrerpolicy: "no-referrer" })
-    : el("span", { class: "av", style: { "--h": hueFrom(name) }, text: initials(name) });
-
-  const chip = el("button", { class: "pill id-chip", title: "Your account" }, [
-    av,
-    el("span", { text: name }),
-    m && isAdminAgent(store.state, m) ? el("span", { class: "badge cy", text: "admin" }) : null
-  ]);
-  chip.addEventListener("click", () => accountDialog(opts));
-  host.append(chip);
-
-  /* Sign out needs to be one obvious click, not buried in a dialog -
-     shared floor PCs depend on it. */
-  if (store.mode === "firebase") {
-    host.append(el("button", {
-      class: "pill signout", title: "Sign out of BreakFlow",
-      onclick: async () => { await store.signOut(); location.reload(); }
-    }, ["Sign out"]));
-  } else if (store.mode === "local") {
-    host.append(el("button", {
-      class: "pill signout", title: "Leave the local demo",
-      onclick: () => store.exitLocalDemo()
-    }, ["Exit demo"]));
-  }
-}
-
-export function changePasswordDialog() {
-  const cur = input({ type: "password", placeholder: "Current password", autocomplete: "current-password" });
-  const p1 = input({ type: "password", placeholder: "New password (6+ characters)", autocomplete: "new-password" });
-  const p2 = input({ type: "password", placeholder: "Repeat new password", autocomplete: "new-password" });
-  modal("Change your password", el("div", { class: "stack" }, [
-    el("p", { class: "muted small" }, ["You need your current password. If you've forgotten it, a supervisor has to make you a new account."]),
-    field("Current password", cur),
-    field("New password", p1),
-    field("Confirm", p2)
-  ]), [
-    { label: "Cancel", kind: "ghost" },
-    {
-      label: "Change password", kind: "primary", onClick: async () => {
-        if (p1.value.length < 6) { toast("Password must be at least 6 characters.", "error"); return false; }
-        if (p1.value !== p2.value) { toast("New passwords don't match.", "error"); return false; }
-        try { await store.changeMyPassword(cur.value, p1.value); }
-        catch (err) { toast(signInHelp(err), "error"); return false; }
-        toast("Password changed", "ok");
-      }
-    }
-  ]);
-}
-
-/** No database configured yet - don't pretend the app is working. */
-export function notConfiguredGate() {
-  return el("div", { class: "gate" }, [
-    el("div", { class: "card pad-lg", style: { maxWidth: "480px" } }, [
-      el("div", { class: "mark big", text: "B" }),
-      el("h2", { class: "center", text: "Not connected yet" }),
-      el("p", { class: "muted center", style: { margin: "10px 0 18px" } },
-        ["BreakFlow needs a Firebase database before anyone can sign in. It takes about five minutes and costs nothing."]),
-      el("div", { class: "btn-row", style: { justifyContent: "center" } }, [
-        el("button", { class: "btn primary", text: "Connect a database", onclick: () => setupDialog() }),
-        el("button", { class: "btn ghost", text: "Try the local demo", onclick: () => store.startLocalDemo() })
-      ]),
-      el("p", { class: "small dim center", style: { marginTop: "16px" } },
-        ["The demo runs entirely in this browser with no sign-in — good for a look around, no use to a team."])
-    ])
-  ]);
-}
-
-/** Banner shown while in the local demo, so nobody mistakes it for live. */
-export function demoBanner() {
-  return el("div", { class: "callout", style: { marginBottom: "16px" } }, [
-    el("div", { class: "row wrap" }, [
-      el("span", {}, ["⚠ Local demo — no sign-in, and nothing is shared with anyone else. Connect a database to go live."]),
-      el("div", { class: "spacer" }),
-      el("button", { class: "btn sm", text: "Connect a database", onclick: () => setupDialog() })
-    ])
-  ]);
-}
-
-function accountDialog(opts) {
-  const u = store.user;
-  const m = store.member || {};
-  const nm = input({ value: m.name || u.name || "", placeholder: "Display name" });
-  const tm = input({ value: m.team || "", placeholder: "Team / shift (optional)" });
-  const local = store.mode === "local";
-
-  modal("Your account", el("div", { class: "stack" }, [
-    el("p", { class: "small muted" }, [
-      local ? "Local demo - no sign-in." : "Signed in as ",
-      local ? null : el("b", { text: displayLogin(u.email) || u.uid })
-    ]),
-    field("Display name", nm, "How your name appears on the board"),
-    field("Team", tm),
-    isAdminAgent(store.state, m) ? el("p", { class: "small" }, [
-      el("span", { class: "badge cy", text: "admin" }), " You can open the supervisor panel."
-    ]) : null,
-    local ? null : el("div", {}, [
-      el("button", { class: "btn sm", text: "Change my password", onclick: () => changePasswordDialog() })
-    ])
-  ]), [
-    local ? null : { label: "Sign out", kind: "ghost", onClick: async () => { await store.signOut(); location.reload(); } },
-    { label: "Cancel", kind: "ghost" },
-    {
-      label: "Save", kind: "primary", onClick: async () => {
-        const name = nm.value.trim();
-        if (!name) { toast("Name can't be empty", "error"); return false; }
-        try {
-          await store.update({
-            ["agents/" + u.uid + "/name"]: name,
-            ["agents/" + u.uid + "/team"]: tm.value.trim()
-          }, "change your details");
-          toast("Saved", "ok");
-        } catch (e) { return false; }
-      }
-    }
-  ].filter(Boolean));
-}
 
 /* ---------- clock in the header ------------------------------------ */
 export function mountClock(node) {
@@ -466,73 +191,6 @@ export function mountClock(node) {
   setInterval(tick, 1000);
 }
 
-/* ---------- database setup dialog ----------------------------------- */
-export function setupDialog() {
-  const current = activeConfig();
-  const ta = el("textarea", {
-    class: "in mono",
-    rows: 9,
-    placeholder: '{\n  "apiKey": "...",\n  "authDomain": "...",\n  "databaseURL": "https://xxx.firebaseio.com",\n  "projectId": "...",\n  "appId": "..."\n}'
-  });
-  if (current) ta.value = JSON.stringify(current, null, 2);
-
-  const body = el("div", { class: "stack" }, [
-    el("p", { class: "muted small" }, [
-      store.mode === "firebase"
-        ? "Connected to a shared Firebase database - everyone sees the same board in real time."
-        : "Running on this device only. Paste a Firebase web config to make the board shared across the whole team."
-    ]),
-    el("details", { class: "howto" }, [
-      el("summary", { text: "How do I get this? (about 5 minutes)" }),
-      el("ol", { class: "small" }, [
-        el("li", { html: "Go to <b>console.firebase.google.com</b> and create a free project." }),
-        el("li", { html: "Build &rarr; <b>Realtime Database</b> &rarr; Create database &rarr; start in <b>test mode</b>." }),
-        el("li", { html: "Build &rarr; <b>Authentication</b> &rarr; Get started &rarr; Sign-in method &rarr; <b>Email/Password</b> &rarr; Enable." }),
-        el("li", { html: "Authentication &rarr; Settings &rarr; <b>Authorized domains</b> &rarr; Add <code>" + esc(location.hostname) + "</code>." }),
-        el("li", { html: "Project settings &rarr; Your apps &rarr; <b>Web</b> &rarr; register app &rarr; copy the <code>firebaseConfig</code> object." }),
-        el("li", { html: "Paste it here and save." }),
-        el("li", { html: "Realtime Database &rarr; <b>Rules</b> &rarr; paste <code>firebase-rules.json</code> &rarr; Publish." })
-      ])
-    ]),
-    field("Firebase web config (JSON)", ta),
-    store.lastError ? el("p", { class: "err small", text: "Last error: " + (store.lastError.message || store.lastError) }) : null
-  ]);
-
-  const actions = [
-    { label: "Cancel", kind: "ghost" },
-    {
-      label: "Disconnect", kind: "ghost", keepOpen: true, onClick: async () => {
-        clearConfig();
-        toast("Local config cleared - reloading", "info");
-        setTimeout(() => location.reload(), 500);
-      }
-    },
-    {
-      label: "Save & reload", kind: "primary", keepOpen: true, onClick: async () => {
-        let cfg;
-        try { cfg = JSON.parse(ta.value.trim().replace(/^const\s+firebaseConfig\s*=\s*/, "").replace(/;\s*$/, "")); }
-        catch (e) { toast("That is not valid JSON. Wrap keys in double quotes.", "error"); return false; }
-        if (!cfg.databaseURL) {
-          if (cfg.projectId) cfg.databaseURL = "https://" + cfg.projectId + "-default-rtdb.firebaseio.com";
-          else { toast("Config needs a databaseURL (enable Realtime Database first).", "error"); return false; }
-        }
-        saveConfig(cfg);
-        toast("Saved. Reconnecting...", "ok");
-        setTimeout(() => location.reload(), 500);
-      }
-    }
-  ];
-  if (current && current.databaseURL) {
-    actions.splice(1, 0, {
-      label: "Copy team invite link", kind: "ghost", keepOpen: true, onClick: async () => {
-        const link = location.origin + location.pathname.replace(/admin\.html$/, "index.html") + "#cfg=" + encodeConfig(current);
-        try { await navigator.clipboard.writeText(link); toast("Invite link copied - send it to the team", "ok"); }
-        catch (e) { prompt("Copy this link:", link); }
-      }
-    });
-  }
-  return modal("Data connection", body, actions);
-}
 
 /* ---------- misc ---------------------------------------------------- */
 export function initials(name) {
@@ -564,4 +222,195 @@ export function setFavicon() {
   let link = document.querySelector("link[rel='icon']");
   if (!link) { link = el("link", { rel: "icon" }); document.head.append(link); }
   link.href = FAVICON;
+}
+
+/* ---------- identity chip + sign out -------------------------------- */
+export function identityChip(host) {
+  host.innerHTML = "";
+  const u = store.user;
+  if (!u) return;
+  host.append(el("button", {
+    class: "pill id-chip", title: "Your account",
+    onclick: () => accountDialog()
+  }, [
+    el("span", { class: "av", style: { "--h": hueFrom(u.name) }, text: initials(u.name) }),
+    el("span", { text: u.name }),
+    u.role === ROLES.ADMIN ? el("span", { class: "badge cy", text: "admin" }) : null
+  ]));
+  host.append(el("button", {
+    class: "pill signout", title: "Sign out so the next person can use this PC",
+    onclick: () => store.signOut()
+  }, ["Sign out"]));
+}
+
+function accountDialog() {
+  const u = store.user;
+  const nm = input({ value: u.name });
+  const tm = input({ value: u.team || "" });
+  modal("Your account", el("div", { class: "stack" }, [
+    el("p", { class: "small muted" }, ["Signed in as ", el("b", { text: u.username })]),
+    field("Display name", nm, "How your name appears on the board"),
+    field("Team", tm),
+    el("div", {}, [
+      el("button", { class: "btn sm", text: "Change my password", onclick: () => changePasswordDialog() })
+    ])
+  ]), [
+    { label: "Cancel", kind: "ghost" },
+    {
+      label: "Save", kind: "primary", onClick: async () => {
+        try { await store.updateAccount(u.uid, { name: nm.value, team: tm.value }); }
+        catch (e) { toast(e.message, "error"); return false; }
+        toast("Saved", "ok");
+      }
+    }
+  ]);
+}
+
+export function changePasswordDialog() {
+  const u = store.user;
+  const cur = input({ type: "password", placeholder: "Current password", autocomplete: "current-password" });
+  const p1 = input({ type: "password", placeholder: "New password", autocomplete: "new-password" });
+  const p2 = input({ type: "password", placeholder: "Repeat new password", autocomplete: "new-password" });
+  modal("Change your password", el("div", { class: "stack" }, [
+    field("Current password", cur),
+    field("New password", p1),
+    field("Confirm", p2),
+    el("p", { class: "small dim", style: { margin: "0" } },
+      ["Forgotten it? An admin can set you a new one from the Accounts tab."])
+  ]), [
+    { label: "Cancel", kind: "ghost" },
+    {
+      label: "Change password", kind: "primary", onClick: async () => {
+        if (p1.value !== p2.value) { toast("New passwords do not match.", "error"); return false; }
+        try { await store.setPassword(u.uid, p1.value, cur.value); }
+        catch (e) { toast(e.message, "error"); return false; }
+        toast("Password changed", "ok");
+      }
+    }
+  ]);
+}
+
+/* ---------- sign in ------------------------------------------------- */
+export function signInGate(teamName) {
+  const user = input({ placeholder: "Username", autocapitalize: "none", autocorrect: "off", spellcheck: "false", autocomplete: "username" });
+  const pass = input({ type: "password", placeholder: "Password", autocomplete: "current-password" });
+  const msg = el("p", { class: "small err", style: { minHeight: "18px", margin: "4px 0 0" } });
+  const btn = el("button", { class: "btn lg primary block", text: "Sign in" });
+
+  const go = async () => {
+    if (!user.value.trim() || !pass.value) { msg.textContent = "Enter your username and password."; return; }
+    btn.disabled = true;
+    msg.textContent = "";
+    try {
+      await store.signIn(user.value.trim(), pass.value);
+    } catch (err) {
+      msg.textContent = err.message || "Sign-in failed.";
+      pass.value = "";
+      pass.focus();
+    } finally { btn.disabled = false; }
+  };
+  btn.addEventListener("click", go);
+  for (const f of [user, pass]) f.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+
+  const card = el("div", { class: "card pad-lg", style: { maxWidth: "400px" } }, [
+    el("div", { class: "center" }, [
+      el("div", { class: "mark big", text: "B" }),
+      el("h2", { text: teamName || "BreakFlow" }),
+      el("p", { class: "muted small", style: { margin: "8px 0 20px" } },
+        ["Sign in to take your break. Only you can start or end your own."])
+    ]),
+    el("div", { class: "stack", style: { gap: "10px" } }, [user, pass, btn, msg]),
+    el("p", { class: "small dim center", style: { marginTop: "16px", marginBottom: "0" } },
+      ["Your supervisor gives you your username and password."])
+  ]);
+  setTimeout(() => user.focus(), 80);
+  return el("div", { class: "gate" }, [card]);
+}
+
+/* ---------- first run ----------------------------------------------- */
+export function setupGate() {
+  const name = input({ placeholder: "Your full name" });
+  const user = input({ placeholder: "Username, e.g. murad", autocapitalize: "none", spellcheck: "false" });
+  const p1 = input({ type: "password", placeholder: "Password" });
+  const p2 = input({ type: "password", placeholder: "Repeat password" });
+  const msg = el("p", { class: "small err", style: { minHeight: "18px", margin: "0" } });
+
+  const go = async () => {
+    msg.textContent = "";
+    if (!name.value.trim()) { msg.textContent = "Enter your name."; return; }
+    if (p1.value !== p2.value) { msg.textContent = "Passwords do not match."; return; }
+    try {
+      const rec = await store.createAccount({
+        username: user.value, name: name.value, password: p1.value, role: ROLES.ADMIN
+      });
+      await store.signIn(rec.username, p1.value);
+      toast("Welcome. You are the admin for this board.", "ok");
+    } catch (e) { msg.textContent = e.message; }
+  };
+  for (const f of [name, user, p1, p2]) f.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+
+  return el("div", { class: "gate" }, [
+    el("div", { class: "card pad-lg", style: { maxWidth: "440px" } }, [
+      el("div", { class: "center" }, [
+        el("div", { class: "mark big", text: "B" }),
+        el("h2", { text: "Set up BreakFlow" }),
+        el("p", { class: "muted small", style: { margin: "8px 0 18px" } },
+          ["Create your own admin account first. You will then create the accounts for everyone else."])
+      ]),
+      el("div", { class: "stack", style: { gap: "10px" } }, [
+        name, user, p1, p2,
+        el("button", { class: "btn lg primary block", text: "Create admin account", onclick: go }),
+        msg
+      ]),
+      el("div", { class: "callout", style: { marginTop: "16px" } }, [
+        "This is the break board for ", el("b", { text: "this computer" }),
+        ". Everything is stored in this browser, so set it up on the PC the team will actually use, and take backups from Settings."
+      ])
+    ])
+  ]);
+}
+
+/* ---------- kiosk auto sign-out ------------------------------------- */
+export function mountKioskTimer() {
+  const bump = () => store.touch();
+  for (const ev of ["click", "keydown", "touchstart", "mousemove"]) {
+    addEventListener(ev, bump, { passive: true });
+  }
+  store.touch();
+  setInterval(() => {
+    const secs = Number(store.state.settings.kioskTimeoutSec || 0);
+    if (!secs || !store.user) return;
+    if (Date.now() - store.lastActive() > secs * 1000) store.signOut();
+  }, 5000);
+}
+
+/* ---------- status pill -------------------------------------------- */
+export function mountStatusPill(host) {
+  const pill = el("button", {
+    class: "pill warn", title: "Where the data lives",
+    onclick: () => storageDialog()
+  }, [el("span", { class: "dot" }), el("span", { class: "lbl", text: "This PC only" })]);
+  host.append(pill);
+  return pill;
+}
+
+export function storageDialog() {
+  modal("This PC only", el("div", { class: "stack" }, [
+    el("p", {}, ["BreakFlow keeps everything in this browser, on this computer. There is no server and nothing to sign up for."]),
+    el("p", { class: "muted small" }, [
+      "So the board works for everyone who uses ", el("b", { text: "this machine" }),
+      ". An agent opening the site on their own PC or phone gets an empty app with its own separate accounts."
+    ]),
+    el("p", { class: "muted small" }, [
+      "Because there is no server, ", el("b", { text: "take backups" }),
+      " from Admin → Settings. Clearing this browser's site data deletes everything."
+    ])
+  ]), [{ label: "Got it", kind: "primary" }]);
+}
+
+/* ---------- error toasts ------------------------------------------- */
+export function mountErrorToasts() {
+  store.onError(({ what, error }) => {
+    toast("Couldn't " + (what || "save") + ": " + ((error && error.message) || "unknown error"), "error");
+  });
 }

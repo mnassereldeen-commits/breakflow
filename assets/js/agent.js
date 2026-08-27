@@ -1,23 +1,18 @@
 /* ============================================================
    BreakFlow - agent view
-
-   You are whoever you signed in as. There is no name picker, so
-   there is nothing to impersonate: the only break you can touch is
-   your own, and the database rules enforce that too.
    ============================================================ */
 
 import {
-  store, STATES, isAdminAgent, displayLogin, reconcile, sortedTypes, sortedAgents, supervisors,
+  store, STATES, ROLES, reconcile, sortedTypes, sortedAgents,
   occupancy, queueFor, listSessions, mySession, queuePosition, estimateStart,
-  requestBreak, endBreak, cancelQueued, dayKey, graceMs, isOver, isPresent,
-  onBreakNow
+  requestBreak, endBreak, cancelQueued, dayKey, isOver, onBreakNow
 } from "./store.js";
 
 import {
   $, el, mmss, hhmm, human, toast, modal, beep, askNotify, notify,
   flashTitle, stopFlash, setBaseTitle, mountStatusPill, mountClock, setFavicon,
-  initials, hueFrom, confirmBox, setupDialog, mountErrorToasts,
-  signInGate, noAccountGate, identityChip, notConfiguredGate, demoBanner, signInHelp
+  initials, hueFrom, confirmBox, mountErrorToasts, mountKioskTimer,
+  signInGate, setupGate, identityChip
 } from "./common.js";
 
 const RING_R = 110;
@@ -33,15 +28,16 @@ mountErrorToasts();
 store.connect().then(() => {
   store.onStatus(render);
   store.onChange(render);
+  mountKioskTimer();
   setInterval(loop, 1000);
   loop();
 });
 
-function me() { return store.member; }
+function me() { return store.user; }
 
 function loop() {
-  if (store.access !== "ok") return;
   reconcile();
+  if (store.access !== "ok") return;
   const now = store.now();
   tickClocks(now);
   watchMine(now);
@@ -54,32 +50,18 @@ function render() {
   $("#teamName").textContent = state.settings.teamName || "Team";
   main.innerHTML = "";
 
-  /* the panel link only appears for supervisors */
+  /* the panel link only appears for admins */
   const link = document.querySelector('a.pill[href="admin.html"]');
-  if (link) link.hidden = !(me() && isAdminAgent(state, me()));
+  if (link) link.hidden = !(me() && me().role === ROLES.ADMIN);
 
   identityChip($("#idHost"));
 
-  if (store.mode === "connecting") {
-    main.append(el("div", { class: "card center", style: { padding: "48px" } }, [el("p", { class: "muted", text: "Connecting…" })]));
-    return;
-  }
-  if (store.mode === "error") {
-    main.append(connectionProblem());
-    return;
-  }
-  if (store.mode === "unconfigured") { main.append(notConfiguredGate()); return; }
-  if (store.access === "signed-out") { main.append(signInGate(state.settings.teamName)); return; }
-  if (store.access === "no-account") { main.append(noAccountGate(store.user)); return; }
-  if (store.access !== "ok" || !me()) {
-    main.append(el("div", { class: "card center", style: { padding: "48px" } }, [el("p", { class: "muted", text: "Loading your profile…" })]));
-    return;
-  }
+  if (store.access === "setup") { main.append(setupGate()); return; }
+  if (store.access !== "ok" || !me()) { main.append(signInGate(state.settings.teamName)); return; }
 
   const now = store.now();
   const mine = mySession(state, store.uid());
 
-  if (store.mode === "local") main.append(demoBanner());
   main.append(el("div", { class: "split" }, [
     el("div", { class: "stack" }, [
       mine ? myBreakCard(state, mine, now) : chooseCard(state, now),
@@ -92,20 +74,6 @@ function render() {
     ])
   ]));
   tickClocks(now);
-}
-
-function connectionProblem() {
-  const err = store.lastError;
-  return el("div", { class: "gate" }, [
-    el("div", { class: "card pad-lg", style: { maxWidth: "480px" } }, [
-      el("h2", { text: "Can't reach the database" }),
-      el("p", { class: "muted small", text: (err && (err.message || err.code)) || "Unknown error." }),
-      el("div", { class: "btn-row", style: { marginTop: "14px" } }, [
-        el("button", { class: "btn primary", text: "Check the connection settings", onclick: () => setupDialog() }),
-        el("button", { class: "btn ghost", text: "Retry", onclick: () => location.reload() })
-      ])
-    ])
-  ]);
 }
 
 /* ---------- choose a break ---------- */
@@ -150,7 +118,7 @@ function chooseCard(state, now) {
       el("h2", { text: "Take a break" }),
       el("span", { class: "tiny", text: occ.total + " of " + globalMax + " away" })
     ]),
-    types.length ? grid : el("p", { class: "empty", text: "No break types configured yet - ask a supervisor." })
+    types.length ? grid : el("p", { class: "empty", text: "No break types set up yet - ask a supervisor." })
   ]);
 }
 
@@ -163,15 +131,15 @@ function ask(bt, willQueue, waiting) {
           " and start automatically the moment a slot opens."
         : "You'll go on " + bt.name + " straight away for " + bt.minutes + " minutes."
     ]),
-    el("p", { class: "muted small", text: "Your timer starts when the break starts, not when you request it. Keep this tab open so the queue can reach you." })
+    el("p", { class: "muted small", text: "Your timer starts when the break starts, not when you request it." })
   ]);
   modal(willQueue ? "Join the queue?" : "Start " + bt.name + "?", body, [
     { label: "Not now", kind: "ghost" },
     {
       label: willQueue ? "Join queue" : "Start break", kind: "primary",
-      onClick: async () => {
+      onClick: () => {
         try {
-          await requestBreak(me(), bt);
+          requestBreak(me(), bt);
           askNotify();
           beep("up");
         } catch (e) { toast(e.message || String(e), "error"); }
@@ -206,7 +174,7 @@ function myBreakCard(state, s, now) {
       el("button", {
         class: "btn danger", onclick: async () => {
           if (await confirmBox("Leave the queue?", "You'll lose your place in line.", "Leave queue")) {
-            await cancelQueued(s.id, "agent");
+            cancelQueued(s.id, me().name);
             toast("You left the queue", "info");
           }
         }
@@ -248,8 +216,8 @@ function myBreakCard(state, s, now) {
     el("div", { class: "back-at", text: "Started " + hhmm(s.startedAt) + " · due back " + hhmm(s.endsAt) + (s.adjusted ? " (adjusted " + (s.adjusted > 0 ? "+" : "") + s.adjusted + "m)" : "") }),
     el("div", { style: { height: "10px" } }),
     el("button", {
-      class: "btn lg primary", onclick: async () => {
-        await endBreak(s.id, "agent");
+      class: "btn lg primary", onclick: () => {
+        endBreak(s.id, me().name);
         stopFlash();
         toast("Welcome back – break closed", "ok");
       }
@@ -314,7 +282,6 @@ function queueCard(state, now, mine) {
     const bt = state.breakTypes[s.breakTypeId] || {};
     const est = estimateStart(state, s, now);
     const isMe = mine && s.id === mine.id;
-    const away = !isPresent(state, s.agentId, now);
     box.append(el("div", { class: "person-row" + (isMe ? " mine" : "") }, [
       el("span", { class: "pos", text: String(i + 1) }),
       el("span", { class: "av", style: { "--h": hueFrom(s.agentName) }, text: initials(s.agentName) }),
@@ -322,9 +289,9 @@ function queueCard(state, now, mine) {
         el("b", { text: s.agentName + (isMe ? " (you)" : "") }),
         el("span", { text: (bt.icon || "") + " " + s.breakTypeName + " · asked " + hhmm(s.requestedAt) })
       ]),
-      away ? el("span", { class: "badge warn", text: "away" })
-        : bt.requiresApproval && !s.approvedBy ? el("span", { class: "badge warn", text: "approval" })
-          : el("span", { class: "rem dim", style: { fontSize: "12.5px" }, text: est && est > now ? "≈" + human(est - now) : "next" })
+      bt.requiresApproval && !s.approvedBy
+        ? el("span", { class: "badge warn", text: "approval" })
+        : el("span", { class: "rem dim", style: { fontSize: "12.5px" }, text: est && est > now ? "≈" + human(est - now) : "next" })
     ]));
   });
   return el("div", { class: "card" }, [
@@ -442,4 +409,4 @@ function watchMine(now) {
   }
 }
 
-window.BreakFlow = { store: store, setup: setupDialog };
+window.BreakFlow = { store: store };

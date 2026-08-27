@@ -1,24 +1,24 @@
 /* ============================================================
    BreakFlow - supervisor panel
 
-   No PIN and no role field. You get in because your email is on the
-   admin list in the database, and the rules check the same thing.
-   Everything you do here is recorded under your name.
+   You get in because your account's role is admin. There is no
+   server, so that is a UI gate, not real security - anyone with
+   developer tools on this PC can reach the stored data directly.
+   Fine for a floor board; don't treat it as more than that.
    ============================================================ */
 
 import {
-  store, STATES, MAX_BREAK_MINUTES, clampMinutes, reconcile,
-  sortedTypes, sortedAgents, supervisors, occupancy, queueFor, listSessions,
+  store, STATES, ROLES, MAX_BREAK_MINUTES, clampMinutes, reconcile,
+  sortedTypes, sortedAgents, admins, occupancy, queueFor, listSessions,
   onBreakNow, endBreak, denyQueued, approveQueued, forceStart, adjustTime,
-  startForAgent, dayKey, isOver, isPresent, encodeConfig, activeConfig,
-  isAdminAgent, adminEmails, emailKey, displayLogin, isSyntheticEmail, loginEmail
+  startForAgent, dayKey, isOver, normUsername
 } from "./store.js";
 
 import {
   $, el, mmss, hhmm, human, toast, modal, confirmBox, field, input, select,
   mountStatusPill, mountClock, setFavicon, initials, hueFrom,
-  csv, download, setupDialog, beep, notify, askNotify, mountErrorToasts,
-  signInGate, noAccountGate, identityChip, notConfiguredGate, demoBanner, signInHelp
+  csv, download, beep, notify, askNotify, mountErrorToasts, mountKioskTimer,
+  signInGate, setupGate, identityChip, storageDialog
 } from "./common.js";
 
 let tab = location.hash.replace("#", "") || "live";
@@ -27,10 +27,7 @@ const alerted = {};
 const PALETTE = ["#22d3ee", "#a78bfa", "#fbbf24", "#34d399", "#f472b6", "#60a5fa", "#fb923c", "#f87171", "#c084fc", "#4ade80"];
 const ICONS = ["☕", "🍴", "🚻", "🕌", "🚬", "📋", "💻", "📞", "🧘", "🩺", "🚶", "🎧"];
 
-/** Whose name lands in the audit trail. */
-function actor() {
-  return (store.member && store.member.name) || "admin";
-}
+function actor() { return (store.user && store.user.name) || "admin"; }
 function isAdmin() { return store.isAdmin(); }
 
 /* ==================== boot ==================== */
@@ -42,12 +39,12 @@ mountErrorToasts();
 store.connect().then(() => {
   store.onStatus(render);
   store.onChange(render);
+  mountKioskTimer();
   setInterval(loop, 1000);
   loop();
 });
 
 function loop() {
-  if (store.access !== "ok") return;
   reconcile();
   if (isAdmin()) { tickClocks(store.now()); watchOverstays(store.now()); }
 }
@@ -60,38 +57,16 @@ function render() {
   main.innerHTML = "";
   identityChip($("#idHost"));
 
-  if (store.mode === "connecting") {
-    main.append(el("div", { class: "card center", style: { padding: "48px" } }, [el("p", { class: "muted", text: "Connecting…" })]));
-    return;
-  }
-  if (store.mode === "error") {
-    main.append(el("div", { class: "gate" }, [
-      el("div", { class: "card pad-lg", style: { maxWidth: "480px" } }, [
-        el("h2", { text: "Can't reach the database" }),
-        el("p", { class: "muted small", text: (store.lastError && (store.lastError.message || store.lastError.code)) || "Unknown error." }),
-        el("div", { class: "btn-row", style: { marginTop: "14px" } }, [
-          el("button", { class: "btn primary", text: "Connection settings", onclick: () => setupDialog() }),
-          el("button", { class: "btn ghost", text: "Retry", onclick: () => location.reload() })
-        ])
-      ])
-    ]));
-    return;
-  }
-  if (store.mode === "unconfigured") { main.append(notConfiguredGate()); return; }
-  if (store.access === "signed-out") { main.append(signInGate(state.settings.teamName)); return; }
-  if (store.access === "no-account") { main.append(noAccountGate(store.user)); return; }
-  if (store.access !== "ok" || !store.member) {
-    main.append(el("div", { class: "card center", style: { padding: "48px" } }, [el("p", { class: "muted", text: "Loading…" })]));
-    return;
-  }
-  if (!isAdmin()) { main.append(notSupervisor()); return; }
+  if (store.access === "setup") { main.append(setupGate()); return; }
+  if (store.access !== "ok" || !store.user) { main.append(signInGate(state.settings.teamName)); return; }
+  if (!isAdmin()) { main.append(notAdmin()); return; }
 
   const nav = el("div", { class: "tabs" });
   const TABS = [
     ["live", "Live board"],
     ["queue", "Queue"],
     ["types", "Break policies"],
-    ["roster", "Roster & access"],
+    ["accounts", "Accounts"],
     ["reports", "Reports"],
     ["settings", "Settings"]
   ];
@@ -104,28 +79,25 @@ function render() {
   }
   main.append(nav);
 
-  if (store.mode === "local") main.append(demoBanner());
-
-
   const body = el("div", { class: "stack" });
   const now = store.now();
   if (tab === "live") body.append(liveTab(state, now));
   else if (tab === "queue") body.append(queueTab(state, now));
   else if (tab === "types") body.append(typesTab(state));
-  else if (tab === "roster") body.append(rosterTab(state, now));
+  else if (tab === "accounts") body.append(accountsTab(state, now));
   else if (tab === "reports") body.append(reportsTab(state, now));
   else body.append(settingsTab(state));
   main.append(body);
   tickClocks(now);
 }
 
-function notSupervisor() {
+function notAdmin() {
   return el("div", { class: "gate" }, [
     el("div", { class: "card pad-lg center", style: { maxWidth: "440px" } }, [
       el("h2", { text: "Supervisors only" }),
       el("p", { class: "muted", style: { margin: "10px 0 18px" } }, [
-        "You're signed in as ", el("b", { text: displayLogin(store.user.email) || store.member.name }),
-        ", which is an agent account. A supervisor can add you to the admin list under Roster & access."
+        "You're signed in as ", el("b", { text: store.user.name }),
+        ", an agent account. An admin can switch your role on the Accounts tab."
       ]),
       el("div", { class: "btn-row", style: { justifyContent: "center" } }, [
         el("a", { class: "btn primary", href: "index.html", text: "← Back to my breaks" })
@@ -155,9 +127,9 @@ function concurrencyCard(state, now) {
       el("span", { text: "hard ceiling across every break type" })
     ]),
     el("span", { class: "badge " + (occ.total >= globalMax ? "warn" : "ok"), text: occ.total + " away now" }),
-    stepper(globalMax, 1, 50, async (v) => {
-      await store.update({ "settings/globalMaxConcurrent": v }, "change the floor cap");
-      await reconcile();
+    stepper(globalMax, 1, 50, (v) => {
+      store.update({ "settings/globalMaxConcurrent": v });
+      reconcile();
       toast("Floor cap set to " + v, "ok");
     })
   ]));
@@ -173,9 +145,9 @@ function concurrencyCard(state, now) {
         el("span", { text: bt.minutes + " min · " + used + " of " + cap + " slots in use" })
       ]),
       waiting ? el("span", { class: "badge cy", text: waiting + " waiting" }) : null,
-      stepper(cap, 1, 50, async (v) => {
-        await store.update({ ["breakTypes/" + bt.id + "/maxConcurrent"]: v }, "change the slot count");
-        await reconcile();
+      stepper(cap, 1, 50, (v) => {
+        store.update({ ["breakTypes/" + bt.id + "/maxConcurrent"]: v });
+        reconcile();
         toast(bt.name + ": " + v + " at a time", "ok");
       })
     ]));
@@ -192,8 +164,8 @@ function concurrencyCard(state, now) {
   ]);
 }
 
-async function bump(s, delta) {
-  const r = await adjustTime(s.id, delta);
+function bump(s, delta) {
+  const r = adjustTime(s.id, delta);
   if (r && r.clamped) {
     if (!r.applied) toast(s.agentName + " is already at the " + MAX_BREAK_MINUTES + "-minute maximum.", "error");
     else toast("Capped at " + MAX_BREAK_MINUTES + " minutes — added " + r.applied + "m only.", "info");
@@ -246,7 +218,7 @@ function liveTab(state, now) {
       el("div", { class: "stat" }, [el("b", { text: String(q.length) }), el("span", { text: "In queue" })]),
       el("div", { class: "stat " + (overs.length ? "bad" : "") }, [el("b", { text: String(overs.length) }), el("span", { text: "Over time" })]),
       el("div", { class: "stat" }, [el("b", { text: String(todays.length) }), el("span", { text: "Breaks today" })]),
-      el("div", { class: "stat" }, [el("b", { text: String(sortedAgents(state).length) }), el("span", { text: "Roster" })])
+      el("div", { class: "stat" }, [el("b", { text: String(sortedAgents(state).length) }), el("span", { text: "Accounts" })])
     ]),
     overs.length ? el("div", { class: "callout" }, [
       "⚠ " + overs.map((s) => s.agentName).join(", ") + " " + (overs.length === 1 ? "is" : "are") + " past their break time."
@@ -275,7 +247,6 @@ function queueList(state, now, q) {
   q.forEach((s, i) => {
     const bt = state.breakTypes[s.breakTypeId] || {};
     const needsOk = bt.requiresApproval && !s.approvedBy;
-    const away = !isPresent(state, s.agentId, now);
     box.append(el("div", { class: "person-row" }, [
       el("span", { class: "pos", text: String(i + 1) }),
       el("span", { class: "av", style: { "--h": hueFrom(s.agentName) }, text: initials(s.agentName) }),
@@ -283,7 +254,6 @@ function queueList(state, now, q) {
         el("b", { text: s.agentName }),
         el("span", { text: (bt.icon || "") + " " + s.breakTypeName + " · waiting " + human(now - (s.requestedAt || now)) })
       ]),
-      away ? el("span", { class: "badge warn", title: "No recent activity — being passed over until they're back at the page", text: "away" }) : null,
       needsOk ? el("span", { class: "badge warn", text: "needs approval" }) : null,
       el("div", { class: "btn-row" }, [
         needsOk ? el("button", { class: "btn sm ok", text: "Approve", onclick: () => approveQueued(s.id, actor()) }) : null,
@@ -316,7 +286,7 @@ function askReason(who) {
 function manualStart(state) {
   const agents = sortedAgents(state);
   const types = sortedTypes(state);
-  if (!agents.length) { toast("Nobody on the roster yet.", "error"); return; }
+  if (!agents.length) { toast("Create an account first.", "error"); return; }
   if (!types.length) { toast("Create a break policy first.", "error"); return; }
   const aSel = select(agents.map((a) => ({ value: a.uid, label: a.name })), agents[0].uid);
   const tSel = select(types.map((t) => ({ value: t.id, label: t.name + " (" + t.minutes + "m)" })), types[0].id);
@@ -326,12 +296,12 @@ function manualStart(state) {
   ]), [
     { label: "Cancel", kind: "ghost" },
     {
-      label: "Start break", kind: "primary", onClick: async () => {
+      label: "Start break", kind: "primary", onClick: () => {
         const a = state.agents[aSel.value];
         const t = state.breakTypes[tSel.value];
         const open = listSessions(state).some((s) => s.agentId === a.uid && [STATES.QUEUED, STATES.ACTIVE, STATES.OVER].includes(s.state));
         if (open) { toast(a.name + " already has an open break.", "error"); return false; }
-        await startForAgent(a, t, actor());
+        startForAgent(a, t, actor());
         toast(a.name + " is on " + t.name, "ok");
       }
     }
@@ -370,7 +340,7 @@ function queueTab(state, now) {
         q.length ? el("button", {
           class: "btn sm danger", text: "Clear the whole queue", onclick: async () => {
             if (await confirmBox("Clear the queue?", q.length + " pending request(s) will be denied.", "Clear queue")) {
-              for (const s of q) await denyQueued(s.id, actor(), "queue cleared");
+              for (const s of q) denyQueued(s.id, actor(), "queue cleared");
               toast("Queue cleared", "ok");
             }
           }
@@ -424,26 +394,26 @@ function typeEditor(state, bt) {
     ic.append(s);
   });
 
-  const save = async () => {
+  const save = () => {
     const wanted = Number(mins.value);
     const minutes = clampMinutes(wanted, bt.minutes);
-    const patch = {};
-    patch["breakTypes/" + bt.id] = {
-      id: bt.id,
-      name: nm.value.trim() || bt.name,
-      minutes: minutes,
-      maxConcurrent: Math.max(1, Math.min(50, Number(cap.value) || 1)),
-      order: Math.max(1, Number(ord.value) || 1),
-      requiresApproval: appr.checked,
-      color: color, icon: icon
-    };
-    try { await store.update(patch, "save the break policy"); } catch (e) { return; }
-    await reconcile();
+    store.update({
+      ["breakTypes/" + bt.id]: {
+        id: bt.id,
+        name: nm.value.trim() || bt.name,
+        minutes: minutes,
+        maxConcurrent: Math.max(1, Math.min(50, Number(cap.value) || 1)),
+        order: Math.max(1, Number(ord.value) || 1),
+        requiresApproval: appr.checked,
+        color: color, icon: icon
+      }
+    });
+    reconcile();
     if (wanted > MAX_BREAK_MINUTES) {
       mins.value = minutes;
       toast("Breaks cannot exceed " + MAX_BREAK_MINUTES + " minutes — saved as " + minutes + ".", "error");
     } else {
-      toast(patch["breakTypes/" + bt.id].name + " saved", "ok");
+      toast((nm.value.trim() || bt.name) + " saved", "ok");
     }
   };
 
@@ -462,7 +432,7 @@ function typeEditor(state, bt) {
       el("button", {
         class: "btn sm danger", text: "Delete", onclick: async () => {
           if (await confirmBox("Delete " + bt.name + "?", "Existing history keeps the name. Agents can no longer pick it.", "Delete")) {
-            await store.update({ ["breakTypes/" + bt.id]: null }, "delete the break policy");
+            store.update({ ["breakTypes/" + bt.id]: null });
             toast("Deleted", "info");
           }
         }
@@ -485,35 +455,33 @@ function newType(state) {
   ]), [
     { label: "Cancel", kind: "ghost" },
     {
-      label: "Create", kind: "primary", onClick: async () => {
+      label: "Create", kind: "primary", onClick: () => {
         const name = nm.value.trim();
         if (!name) { toast("Give it a name", "error"); return false; }
         if (Number(mins.value) > MAX_BREAK_MINUTES) { toast("Breaks cannot exceed " + MAX_BREAK_MINUTES + " minutes.", "error"); return false; }
-        const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 24) || store.newId("breakTypes");
+        const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 24) || store.newId();
         if ((state.breakTypes || {})[id]) { toast("A break type with that name already exists.", "error"); return false; }
         const order = Object.keys(state.breakTypes || {}).length + 1;
-        try {
-          await store.update({
-            ["breakTypes/" + id]: {
-              id: id, name: name,
-              minutes: clampMinutes(mins.value, 15),
-              maxConcurrent: Math.max(1, Math.min(50, Number(cap.value) || 1)),
-              order: order, requiresApproval: appr.checked,
-              color: PALETTE[order % PALETTE.length], icon: ICONS[order % ICONS.length]
-            }
-          }, "create the break type");
-        } catch (e) { return false; }
-        await reconcile();
+        store.update({
+          ["breakTypes/" + id]: {
+            id: id, name: name,
+            minutes: clampMinutes(mins.value, 15),
+            maxConcurrent: Math.max(1, Math.min(50, Number(cap.value) || 1)),
+            order: order, requiresApproval: appr.checked,
+            color: PALETTE[order % PALETTE.length], icon: ICONS[order % ICONS.length]
+          }
+        });
+        reconcile();
         toast(name + " created", "ok");
       }
     }
   ]);
 }
 
-/* ==================== roster & access ==================== */
-function rosterTab(state, now) {
+/* ==================== accounts ==================== */
+function accountsTab(state, now) {
   const agents = sortedAgents(state);
-  const admins = supervisors(state);
+  const admin = admins(state);
   const today = dayKey(now);
   const rows = el("tbody");
 
@@ -521,71 +489,67 @@ function rosterTab(state, now) {
     const mine = listSessions(state).filter((s) => s.agentId === a.uid && s.day === today);
     const openS = mine.find((s) => [STATES.QUEUED, STATES.ACTIVE, STATES.OVER].includes(s.state));
     const used = mine.filter((s) => s.startedAt).reduce((t, s) => t + Math.max(0, (s.endedAt || now) - s.startedAt), 0);
-    const present = isPresent(state, a.uid, now);
     const isSelf = a.uid === store.uid();
-    const admin = isAdminAgent(state, a);
+    const lastAdmin = a.role === ROLES.ADMIN && admin.length <= 1;
 
     rows.append(el("tr", {}, [
       el("td", {}, [el("div", { class: "row" }, [
         el("span", { class: "av", style: { "--h": hueFrom(a.name) }, text: initials(a.name) }),
         el("div", {}, [
           el("b", { text: a.name + (isSelf ? " (you)" : "") }),
-          el("div", { class: "tiny", style: { textTransform: "none", letterSpacing: "0" }, text: displayLogin(a) })
+          el("div", { class: "tiny", style: { textTransform: "none", letterSpacing: "0" }, text: a.username })
         ])
       ])]),
       el("td", { class: "muted", text: a.team || "—" }),
       el("td", {}, [
-        admin
-          ? el("span", { class: "badge cy", title: "Their email is on the admin list", text: "⚙ admin" })
-          : el("span", { class: "badge", text: "agent" })
+        el("button", {
+          class: "role-btn badge " + (a.role === ROLES.ADMIN ? "cy" : ""),
+          title: lastAdmin ? "Keep at least one admin" : "Switch between agent and admin",
+          text: a.role === ROLES.ADMIN ? "⚙ admin" : "agent",
+          onclick: async () => {
+            const next = a.role === ROLES.ADMIN ? ROLES.AGENT : ROLES.ADMIN;
+            if (next === ROLES.AGENT && isSelf &&
+              !(await confirmBox("Give up your own admin access?", "You'll lose this panel immediately. Another admin would have to give it back.", "Yes, step down"))) return;
+            try { await store.updateAccount(a.uid, { role: next }); }
+            catch (e) { toast(e.message, "error"); return; }
+            toast(a.name + " is now " + (next === ROLES.ADMIN ? "an admin" : "an agent"), "ok");
+          }
+        })
       ]),
       el("td", {}, [
         openS
           ? el("span", { class: "badge " + (openS.state === STATES.QUEUED ? "cy" : isOver(openS, now) ? "bad" : "ok") },
             [openS.state === STATES.QUEUED ? "in queue" : isOver(openS, now) ? "over time" : "on break"])
-          : el("span", { class: "badge " + (present ? "" : "warn"), text: present ? "available" : "away" })
+          : el("span", { class: "badge", text: "available" })
       ]),
       el("td", { class: "num", text: String(mine.filter((s) => s.startedAt).length) }),
       el("td", { class: "num", text: human(used) }),
       el("td", {}, [el("div", { class: "btn-row" }, [
-        el("button", { class: "btn sm", text: "Edit", onclick: () => editAgent(a) }),
-        !isSyntheticEmail(a.email) ? el("button", {
-          class: "btn sm", text: "Reset email",
-          title: "Email this person a password reset link",
-          onclick: async () => {
-            if (!(await confirmBox("Send a reset link to " + a.email + "?",
-              "Firebase emails them a link to choose a new password. You never see it.", "Send"))) return;
-            try { await store.sendResetEmail(a.email); toast("Reset link sent to " + a.email, "ok"); }
-            catch (e) { toast(signInHelp(e), "error"); }
-          }
-        }) : null,
+        el("button", { class: "btn sm", text: "Edit", onclick: () => editAccount(a) }),
+        el("button", { class: "btn sm", text: "Set password", onclick: () => resetPasswordDialog(a) }),
         el("button", {
           class: "btn sm danger", text: "Remove", onclick: async () => {
-            if (admin && admins.length <= 1) { toast("Take their email off the admin list first.", "error"); return; }
-            if (await confirmBox("Remove " + a.name + "?",
-              "Their break history stays in reports, and they can no longer see or do anything. The login itself keeps existing in Firebase Authentication — delete it there too if you want the username freed up.", "Remove")) {
-              await store.update({ ["agents/" + a.uid]: null }, "remove someone");
-              toast("Removed", "info");
-            }
+            if (!(await confirmBox("Remove " + a.name + "?",
+              "Their login stops working straight away. Their break history stays in reports.", "Remove"))) return;
+            try { await store.deleteAccount(a.uid); toast("Removed", "info"); }
+            catch (e) { toast(e.message, "error"); }
           }
         })
       ])])
     ]));
   }
 
-  const link = location.origin + location.pathname.replace(/admin\.html$/, "index.html");
-
   return el("div", { class: "stack" }, [
     el("div", { class: "card" }, [
       el("div", { class: "card-head" }, [
-        el("h2", { text: "Roster" }),
-        el("span", { class: "tiny", text: agents.length + " people · " + admins.length + " admin" + (admins.length === 1 ? "" : "s") }),
-        el("button", { class: "btn sm", text: "＋ Add supervisor", onclick: () => newAccount(state, true) }),
-        el("button", { class: "btn sm primary", text: "＋ Add agent", onclick: () => newAccount(state, false) })
+        el("h2", { text: "Accounts" }),
+        el("span", { class: "tiny", text: agents.length + " people · " + admin.length + " admin" + (admin.length === 1 ? "" : "s") }),
+        el("button", { class: "btn sm", text: "＋ Add admin", onclick: () => newAccount(ROLES.ADMIN) }),
+        el("button", { class: "btn sm primary", text: "＋ Add agent", onclick: () => newAccount(ROLES.AGENT) })
       ]),
       el("p", { class: "muted small", style: { marginTop: "-4px" } }, [
-        "You create the accounts. Give each person their username and password, and send them ",
-        el("a", { href: link, text: "the link" }), ". Nobody can sign up on their own."
+        "You create every login here and hand over the username and password. Forgotten a password? Use ",
+        el("b", { text: "Set password" }), " — you can set a new one for anybody, no email needed."
       ]),
       agents.length ? el("div", { class: "tbl-wrap" }, [
         el("table", { class: "tbl" }, [
@@ -595,77 +559,9 @@ function rosterTab(state, now) {
           ])]),
           rows
         ])
-      ]) : el("p", { class: "empty", text: "No accounts yet. Use “Add agent” to create the first one." })
-    ]),
-
-    adminsCard(state),
-
-    el("div", { class: "card" }, [
-      el("div", { class: "card-head" }, [el("h2", { text: "Forgotten passwords" })]),
-      el("p", { class: "muted small" }, [
-        "An agent can change their own password from their account menu, as long as they still know the current one."
-      ]),
-      el("p", { class: "muted small" }, [
-        "If they've genuinely forgotten it, there's no way for you to set a new one from here — that needs a paid Firebase backend. Two ways out: create them a fresh account (say ",
-        el("code", { text: "sara2" }), ") and remove the old row, or reset it yourself in the ",
-        el("b", { text: "Firebase console → Authentication → Users" }), " list, which has a “Reset password” option on every account."
-      ]),
-      el("p", { class: "muted small", style: { marginBottom: "0" } }, [
-        "To avoid this entirely, create accounts with real email addresses instead of usernames — then a ",
-        el("b", { text: "Reset email" }), " button appears on their row and Firebase mails them a link."
-      ])
+      ]) : el("p", { class: "empty", text: "No accounts yet." })
     ])
   ]);
-}
-
-/** Create a login for someone. Passwords are set here and handed over in person. */
-function newAccount(state, asAdmin) {
-  const name = input({ placeholder: "Full name" });
-  const user = input({ placeholder: "username  (or a real email address)", autocapitalize: "none", spellcheck: "false" });
-  const team = input({ placeholder: "Team / shift (optional)" });
-  const pass = input({ type: "text", value: suggestPassword(), autocomplete: "off" });
-  const hint = el("p", { class: "small dim", style: { margin: "0" } });
-
-  const sync = () => {
-    const u = user.value.trim().toLowerCase();
-    hint.textContent = u
-      ? (u.includes("@")
-        ? "Real address — they'll be able to get password-reset emails."
-        : "They sign in with just “" + u + "”. No email, so no reset links.")
-      : "";
-  };
-  user.addEventListener("input", sync);
-
-  modal(asAdmin ? "Add a supervisor" : "Add an agent", el("div", { class: "stack" }, [
-    field("Full name", name),
-    field("Username", user),
-    hint,
-    field("Team", team),
-    field("Password", pass, "Write this down and give it to them — it isn't shown again. They can change it themselves later."),
-    el("div", {}, [el("button", { class: "btn sm", text: "🎲 New password", onclick: () => { pass.value = suggestPassword(); } })]),
-    asAdmin ? el("div", { class: "callout cy" }, ["This account gets the supervisor panel and can create other accounts."]) : null
-  ]), [
-    { label: "Cancel", kind: "ghost" },
-    {
-      label: asAdmin ? "Create supervisor" : "Create agent", kind: "primary", onClick: async () => {
-        if (!name.value.trim()) { toast("Enter their name.", "error"); return false; }
-        if (!user.value.trim()) { toast("Choose a username.", "error"); return false; }
-        if (pass.value.length < 6) { toast("Password must be at least 6 characters.", "error"); return false; }
-        let res;
-        try {
-          res = await store.createAccount({
-            username: user.value.trim(),
-            name: name.value.trim(),
-            team: team.value.trim(),
-            password: pass.value,
-            makeAdmin: !!asAdmin
-          });
-        } catch (e) { toast(signInHelp(e), "error"); return false; }
-        credentialsDialog(name.value.trim(), displayLogin(res.email), pass.value);
-      }
-    }
-  ]);
-  setTimeout(sync, 0);
 }
 
 function suggestPassword() {
@@ -674,19 +570,54 @@ function suggestPassword() {
   return w + "-" + String(Math.floor(Math.random() * 9000) + 1000);
 }
 
-/** Shown once, right after creating an account. */
+function newAccount(role) {
+  const name = input({ placeholder: "Full name" });
+  const user = input({ placeholder: "username", autocapitalize: "none", spellcheck: "false" });
+  const team = input({ placeholder: "Team / shift (optional)" });
+  const pass = input({ type: "text", value: suggestPassword() });
+
+  /* suggest a username from the name, until they type their own */
+  let touched = false;
+  user.addEventListener("input", () => { touched = true; });
+  name.addEventListener("input", () => {
+    if (!touched) user.value = normUsername(name.value).slice(0, 20);
+  });
+
+  modal(role === ROLES.ADMIN ? "Add an admin" : "Add an agent", el("div", { class: "stack" }, [
+    field("Full name", name),
+    field("Username", user, "Letters, numbers, dot, dash, underscore. This is what they type to sign in."),
+    field("Team", team),
+    field("Password", pass, "Write it down and give it to them. You can change it any time from “Set password”."),
+    el("div", {}, [el("button", { class: "btn sm", text: "🎲 New password", onclick: () => { pass.value = suggestPassword(); } })]),
+    role === ROLES.ADMIN ? el("div", { class: "callout cy" }, ["This account gets the supervisor panel and can create other accounts."]) : null
+  ]), [
+    { label: "Cancel", kind: "ghost" },
+    {
+      label: role === ROLES.ADMIN ? "Create admin" : "Create agent", kind: "primary", onClick: async () => {
+        if (!name.value.trim()) { toast("Enter their name.", "error"); return false; }
+        let rec;
+        try {
+          rec = await store.createAccount({
+            username: user.value, name: name.value, team: team.value, password: pass.value, role: role
+          });
+        } catch (e) { toast(e.message, "error"); return false; }
+        credentialsDialog(rec.name, rec.username, pass.value);
+      }
+    }
+  ]);
+}
+
 function credentialsDialog(name, username, password) {
-  const text = "BreakFlow login for " + name + "\nUsername: " + username + "\nPassword: " + password + "\n" +
-    location.origin + location.pathname.replace(/admin\.html$/, "index.html");
+  const text = "BreakFlow login for " + name + "\nUsername: " + username + "\nPassword: " + password;
   modal("Account created", el("div", { class: "stack" }, [
-    el("p", { class: "muted small" }, ["Give these to " + name + " now. The password isn't stored anywhere you can read it back."]),
+    el("p", { class: "muted small" }, ["Give these to " + name + ". You can always set a new password later."]),
     el("div", { class: "creds" }, [
       el("div", {}, [el("span", { class: "tiny", text: "Username" }), el("b", { text: username })]),
       el("div", {}, [el("span", { class: "tiny", text: "Password" }), el("b", { text: password })])
     ]),
     el("div", { class: "btn-row" }, [
       el("button", {
-        class: "btn sm", text: "Copy all", onclick: async () => {
+        class: "btn sm", text: "Copy both", onclick: async () => {
           try { await navigator.clipboard.writeText(text); toast("Copied", "ok"); }
           catch (e) { prompt("Copy this:", text); }
         }
@@ -695,84 +626,36 @@ function credentialsDialog(name, username, password) {
   ]), [{ label: "Done", kind: "primary" }]);
 }
 
-/** The admin list, by email. This is the whole authorisation story. */
-function adminsCard(state) {
-  const emails = adminEmails(state);
-  const mine = (store.user && store.user.email || "").toLowerCase();
-  const box = el("div", { class: "stack", style: { gap: "8px" } });
-
-  for (const email of emails) {
-    const known = sortedAgents(state).find((a) => (a.email || "").toLowerCase() === email);
-    const isMe = email === mine;
-    box.append(el("div", { class: "conc-row", style: { "--c": "#22d3ee" } }, [
-      el("span", { class: "ico", text: "⚙" }),
-      el("div", { class: "who" }, [
-        el("b", { text: displayLogin(email) + (isMe ? "  (you)" : "") }),
-        el("span", { text: known ? known.name : "no account with this login yet" })
-      ]),
-      el("button", {
-        class: "btn sm danger", text: "Remove",
-        onclick: async () => {
-          if (emails.length <= 1) { toast("You'd lock everyone out of the panel. Add another admin first.", "error"); return; }
-          const warn = isMe
-            ? "You'll lose this panel the moment it saves. Another admin would have to add you back."
-            : "They keep their agent account and their break history — they just lose the supervisor panel.";
-          if (!(await confirmBox("Remove " + email + " as an admin?", warn, "Remove admin"))) return;
-          try { await store.update({ ["admins/" + emailKey(email)]: null }, "change the admin list"); }
-          catch (e) { return; }
-          toast(email + " is no longer an admin", "ok");
-        }
-      })
-    ]));
-  }
-
-  const inp = input({ placeholder: "username of an existing account", autocapitalize: "none", spellcheck: "false", autocomplete: "off" });
-  const add = async () => {
-    const email = loginEmail(inp.value.trim());
-    if (!email) { toast("Type a username.", "error"); return; }
-    if (emails.includes(email)) { toast("Already an admin.", "info"); return; }
-    try { await store.update({ ["admins/" + emailKey(email)]: true }, "change the admin list"); }
-    catch (e) { return; }
-    inp.value = "";
-    toast(displayLogin(email) + " is now an admin", "ok");
-  };
-  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") add(); });
-
-  return el("div", { class: "card" }, [
-    el("div", { class: "card-head" }, [
-      el("h2", { text: "Who is an admin" }),
-      el("span", { class: "tiny", text: emails.length + " " + (emails.length === 1 ? "login" : "logins") })
-    ]),
-    el("p", { class: "muted small", style: { marginTop: "-4px" } }, [
-      "Admin is decided by login name, held here and checked by the database itself — so nothing an agent does to their own account can promote them. Use this to promote or demote an existing account; “Add supervisor” above creates a brand-new one."
-    ]),
-    box,
-    el("div", { class: "row wrap", style: { marginTop: "12px" } }, [
-      el("div", { style: { flex: "1", minWidth: "220px" } }, [inp]),
-      el("button", { class: "btn primary", text: "Make admin", onclick: add })
-    ])
+function resetPasswordDialog(a) {
+  const pass = input({ type: "text", value: suggestPassword() });
+  modal("Set a password for " + a.name, el("div", { class: "stack" }, [
+    el("p", { class: "muted small" }, ["Their old password stops working immediately. Give them the new one."]),
+    field("New password", pass),
+    el("div", {}, [el("button", { class: "btn sm", text: "🎲 New password", onclick: () => { pass.value = suggestPassword(); } })])
+  ]), [
+    { label: "Cancel", kind: "ghost" },
+    {
+      label: "Set password", kind: "primary", onClick: async () => {
+        try { await store.setPassword(a.uid, pass.value); }
+        catch (e) { toast(e.message, "error"); return false; }
+        credentialsDialog(a.name, a.username, pass.value);
+      }
+    }
   ]);
 }
 
-function editAgent(a) {
-  const nm = input({ value: a.name, placeholder: "Full name" });
-  const tm = input({ value: a.team || "", placeholder: "Team / shift (optional)" });
+function editAccount(a) {
+  const nm = input({ value: a.name });
+  const un = input({ value: a.username, autocapitalize: "none", spellcheck: "false" });
+  const tm = input({ value: a.team || "" });
   modal("Edit " + a.name, el("div", { class: "stack" }, [
-    el("p", { class: "small dim", text: a.email || "" }),
-    field("Display name", nm),
-    field("Team", tm)
+    field("Full name", nm), field("Username", un), field("Team", tm)
   ]), [
     { label: "Cancel", kind: "ghost" },
     {
       label: "Save", kind: "primary", onClick: async () => {
-        const name = nm.value.trim();
-        if (!name) { toast("Name required", "error"); return false; }
-        try {
-          await store.update({
-            ["agents/" + a.uid + "/name"]: name,
-            ["agents/" + a.uid + "/team"]: tm.value.trim()
-          }, "edit someone's details");
-        } catch (e) { return false; }
+        try { await store.updateAccount(a.uid, { name: nm.value, username: un.value, team: tm.value }); }
+        catch (e) { toast(e.message, "error"); return false; }
         toast("Saved", "ok");
       }
     }
@@ -868,11 +751,11 @@ function dayReport(state, day, now) {
 }
 
 function sessionRows(state, sessions, now) {
-  const head = ["Date", "Agent", "Email", "Team", "Break", "State", "Requested", "Started", "Due back", "Ended", "Planned min", "Actual min", "Over min", "Closed by"];
+  const head = ["Date", "Agent", "Username", "Team", "Break", "State", "Requested", "Started", "Due back", "Ended", "Planned min", "Actual min", "Over min", "Closed by"];
   const body = sessions.sort((a, b) => (a.requestedAt || 0) - (b.requestedAt || 0)).map((s) => {
     const rec = (state.agents || {})[s.agentId] || {};
     return [
-      s.day || dayKey(s.requestedAt || now), s.agentName, rec.email || "", s.team || "", s.breakTypeName, s.state,
+      s.day || dayKey(s.requestedAt || now), s.agentName, rec.username || "", s.team || "", s.breakTypeName, s.state,
       s.requestedAt ? new Date(s.requestedAt).toLocaleString() : "",
       s.startedAt ? new Date(s.startedAt).toLocaleString() : "",
       s.endsAt ? new Date(s.endsAt).toLocaleString() : "",
@@ -901,7 +784,7 @@ function settingsTab(state) {
   const team = input({ value: state.settings.teamName || "" });
   const cap = input({ type: "number", min: "1", max: "50", value: state.settings.globalMaxConcurrent });
   const grace = input({ type: "number", min: "0", max: "60", value: state.settings.graceMinutes });
-  const cfg = activeConfig();
+  const kiosk = input({ type: "number", min: "0", max: "3600", value: state.settings.kioskTimeoutSec });
 
   return el("div", { class: "stack" }, [
     el("div", { class: "card" }, [
@@ -909,80 +792,102 @@ function settingsTab(state) {
       el("div", { class: "inline-fields" }, [
         field("Team name", team),
         field("Max people away at once", cap, "hard ceiling across all break types"),
-        field("Overtime grace (minutes)", grace, "how long an overstay keeps blocking its slot")
+        field("Overtime grace (minutes)", grace, "how long an overstay keeps blocking its slot"),
+        field("Auto sign-out (seconds)", kiosk, "0 = stay signed in")
       ]),
-      el("div", { style: { height: "14px" } }),
+      el("p", { class: "small dim", style: { marginTop: "10px" } },
+        ["Auto sign-out returns this PC to the login screen after that long without a click, so the next agent gets a clean slate. Running breaks keep their timers — the agent signs back in to tap “I'm back”."]),
+      el("div", { style: { height: "10px" } }),
       el("button", {
-        class: "btn primary", text: "Save policy", onclick: async () => {
-          try {
-            await store.update({
-              "settings/teamName": team.value.trim() || "Team",
-              "settings/globalMaxConcurrent": Math.max(1, Math.min(50, Number(cap.value) || 1)),
-              "settings/graceMinutes": Math.max(0, Number(grace.value) || 0)
-            }, "save the floor policy");
-          } catch (e) { return; }
-          await reconcile();
+        class: "btn primary", text: "Save policy", onclick: () => {
+          store.update({
+            "settings/teamName": team.value.trim() || "Team",
+            "settings/globalMaxConcurrent": Math.max(1, Math.min(50, Number(cap.value) || 1)),
+            "settings/graceMinutes": Math.max(0, Number(grace.value) || 0),
+            "settings/kioskTimeoutSec": Math.max(0, Math.min(3600, Number(kiosk.value) || 0))
+          });
+          reconcile();
           toast("Policy saved", "ok");
         }
       })
     ]),
 
     el("div", { class: "card" }, [
-      el("div", { class: "card-head" }, [el("h2", { text: "Sign-in & access" })]),
-      el("p", { class: "muted small" }, [
-        "Everyone signs in with Google. The database rules only let a person create or change their own break — a colleague can't start, extend or close it, and a closed break can't be rewritten. Admins can do all of it, and their name is recorded on every override."
+      el("div", { class: "card-head" }, [el("h2", { text: "Backup" })]),
+      el("div", { class: "callout" }, [
+        "⚠ Everything lives in this browser. If someone clears this PC's site data, or the machine is replaced, ",
+        el("b", { text: "it is all gone" }), ". Download a backup regularly — accounts, breaks and history are all in the file."
       ]),
-      el("div", { class: "btn-row" }, [
-        el("button", { class: "btn", text: "Roster & access", onclick: () => { tab = "roster"; location.hash = "roster"; render(); } })
-      ])
-    ]),
-
-    el("div", { class: "card" }, [
-      el("div", { class: "card-head" }, [el("h2", { text: "Data connection" })]),
-      el("p", { class: "muted small" }, [
-        store.mode === "firebase"
-          ? "Live shared database: " + (cfg && cfg.databaseURL ? cfg.databaseURL : "connected")
-          : "No shared database — this browser only."
-      ]),
-      el("div", { class: "btn-row" }, [
-        el("button", { class: "btn", text: "Configure database", onclick: () => setupDialog() }),
-        cfg ? el("button", {
-          class: "btn", text: "Copy team invite link", onclick: async () => {
-            const link = location.origin + location.pathname.replace(/admin\.html$/, "index.html") + "#cfg=" + encodeConfig(cfg);
-            try { await navigator.clipboard.writeText(link); toast("Link copied", "ok"); }
-            catch (e) { prompt("Copy this link:", link); }
+      el("div", { class: "btn-row", style: { marginTop: "12px" } }, [
+        el("button", {
+          class: "btn primary", text: "⭳ Download backup", onclick: () => {
+            download("breakflow-backup-" + dayKey(store.now()) + ".json", store.exportJSON(), "application/json");
+            toast("Backup downloaded", "ok");
           }
-        }) : null
+        }),
+        el("button", { class: "btn", text: "⭱ Restore from backup", onclick: () => restoreDialog() }),
+        el("button", { class: "btn ghost", text: "Where does the data live?", onclick: () => storageDialog() })
       ])
     ]),
 
     el("div", { class: "card" }, [
       el("div", { class: "card-head" }, [el("h2", { text: "Housekeeping" })]),
-      el("p", { class: "muted small", text: "Break history is kept so reports stay accurate. Trim it when it gets large." }),
       el("div", { class: "btn-row" }, [
+        el("button", {
+          class: "btn", text: "Close every open break", onclick: async () => {
+            const open = listSessions(state).filter((s) => [STATES.ACTIVE, STATES.OVER].includes(s.state));
+            if (!open.length) { toast("No open breaks", "info"); return; }
+            if (!(await confirmBox("Close " + open.length + " open break(s)?", "Use this at end of shift to reset the board.", "Close all"))) return;
+            for (const s of open) endBreak(s.id, actor() + " (bulk)");
+            toast("All breaks closed", "ok");
+          }
+        }),
         el("button", {
           class: "btn danger", text: "Delete history older than 30 days", onclick: async () => {
             const cutoff = store.now() - 30 * 86400000;
             const old = listSessions(state).filter((s) => (s.requestedAt || 0) < cutoff);
             if (!old.length) { toast("Nothing older than 30 days", "info"); return; }
-            if (!(await confirmBox("Delete " + old.length + " old records?", "This cannot be undone. Export a CSV first if you need it.", "Delete"))) return;
+            if (!(await confirmBox("Delete " + old.length + " old records?", "This cannot be undone. Download a backup first if you need it.", "Delete"))) return;
             const patch = {};
             for (const s of old) patch["sessions/" + s.id] = null;
-            await store.update(patch, "delete old history");
+            store.update(patch);
             toast(old.length + " records deleted", "ok");
           }
         }),
         el("button", {
-          class: "btn danger", text: "Close every open break", onclick: async () => {
-            const open = listSessions(state).filter((s) => [STATES.ACTIVE, STATES.OVER].includes(s.state));
-            if (!open.length) { toast("No open breaks", "info"); return; }
-            if (!(await confirmBox("Close " + open.length + " open break(s)?", "Use this at end of shift to reset the board.", "Close all"))) return;
-            for (const s of open) await endBreak(s.id, actor() + " (bulk)");
-            toast("All breaks closed", "ok");
+          class: "btn danger", text: "Erase everything", onclick: async () => {
+            if (!(await confirmBox("Erase all BreakFlow data on this PC?",
+              "Accounts, breaks and history. There is no undo — download a backup first.", "Erase everything"))) return;
+            store.wipeEverything();
+            location.reload();
           }
         })
       ])
     ])
+  ]);
+}
+
+function restoreDialog() {
+  const file = el("input", { type: "file", accept: ".json,application/json", class: "in" });
+  modal("Restore from backup", el("div", { class: "stack" }, [
+    el("div", { class: "callout" }, [
+      "⚠ This replaces everything currently on this PC — accounts, breaks and history — with the contents of the file."
+    ]),
+    field("Backup file", file)
+  ]), [
+    { label: "Cancel", kind: "ghost" },
+    {
+      label: "Restore", kind: "danger", onClick: async () => {
+        const f = file.files && file.files[0];
+        if (!f) { toast("Choose a backup file.", "error"); return false; }
+        let text;
+        try { text = await f.text(); } catch (e) { toast("Couldn't read that file.", "error"); return false; }
+        try { store.importJSON(text); }
+        catch (e) { toast(e.message, "error"); return false; }
+        toast("Restored. Sign in again.", "ok");
+        setTimeout(() => location.reload(), 700);
+      }
+    }
   ]);
 }
 
@@ -1015,4 +920,4 @@ function watchOverstays(now) {
   }
 }
 
-window.BreakFlow = { store: store, setup: setupDialog };
+window.BreakFlow = { store: store };

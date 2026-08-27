@@ -1,42 +1,23 @@
 /* ============================================================
-   BreakFlow - identity, data layer and queue engine
+   BreakFlow - accounts, data and the queue engine
 
-   Agents sign in with a username and password that an admin created
-   for them. The database rules are the real gate: you may only write
-   your OWN break, admins may write anyone's.
+   Everything lives in this browser's localStorage. No server, no
+   third-party service, nothing to set up: put the site on one shared
+   break-board PC, create the accounts, and the team uses that machine.
 
-   Two backends behind one API:
-     firebase : shared live state, real sign-in, rules enforced
-     local    : localStorage demo, no sign-in, one browser only
+   Consequences, stated plainly:
+     * Data does not leave this browser. Another computer sees an
+       empty app. Take backups (Admin -> Settings -> Backup).
+     * Login stops people acting as each other by accident or mischief.
+       It is not real security: anyone with developer tools on this PC
+       can read or edit the stored data directly.
    ============================================================ */
 
-import { FIREBASE_CONFIG, DB_ROOT, DEFAULTS, LOGIN_DOMAIN } from "./config.js";
+import { DEFAULTS } from "./config.js";
 
-/* ------------------------------------------------------------------
-   Usernames. Firebase Auth only speaks email, so a bare username is
-   mapped onto a synthetic address. Anything with an "@" is a real
-   address and passes through untouched (so reset emails can work).
-   ------------------------------------------------------------------ */
-export function loginEmail(username) {
-  const u = String(username || "").trim().toLowerCase();
-  if (!u) return "";
-  return u.includes("@") ? u : u + "@" + LOGIN_DOMAIN;
-}
-export function isSyntheticEmail(email) {
-  return String(email || "").toLowerCase().endsWith("@" + LOGIN_DOMAIN);
-}
-/** What to show a human: the username, or the real address. */
-export function displayLogin(emailOrAgent) {
-  const email = typeof emailOrAgent === "string"
-    ? emailOrAgent
-    : (emailOrAgent && emailOrAgent.email) || "";
-  return isSyntheticEmail(email) ? email.split("@")[0] : email;
-}
-
-const SDK = "https://www.gstatic.com/firebasejs/10.12.2";
-const LS_CFG = "breakflow.fbconfig";
-const LS_DATA = "breakflow.localdb";
-const LS_DEMO = "breakflow.demo";
+const LS_DATA = "breakflow.db";
+const LS_SESSION = "breakflow.session";
+const LS_ACTIVE = "breakflow.lastActive";
 
 export const STATES = {
   QUEUED: "queued", ACTIVE: "active", OVER: "over",
@@ -45,34 +26,10 @@ export const STATES = {
 const CLOSED = [STATES.DONE, STATES.CANCELLED, STATES.DENIED];
 const OPEN = [STATES.QUEUED, STATES.ACTIVE, STATES.OVER];
 
-/* ------------------------------------------------------------------
-   Admins are decided by EMAIL, held in /admins as { emailKey: true }.
-   Nothing about an agent's own record can make them an admin, so there
-   is no promotion path to abuse - the same check runs in the rules.
-   ------------------------------------------------------------------ */
-export function emailKey(email) {
-  return String(email || "").trim().toLowerCase().replace(/\./g, ",");
-}
-export function isAdminEmail(state, email) {
-  if (!email) return false;
-  return (state.admins || {})[emailKey(email)] === true;
-}
-export function isAdminAgent(state, agent) {
-  return !!agent && isAdminEmail(state, agent.email);
-}
-export function adminEmails(state) {
-  return Object.keys(state.admins || {})
-    .filter((k) => state.admins[k] === true)
-    .map((k) => k.replace(/,/g, "."))
-    .sort();
-}
+export const ROLES = { AGENT: "agent", ADMIN: "admin" };
 
 /** Hard ceiling on any single break, in minutes. */
 export const MAX_BREAK_MINUTES = 60;
-
-/** An agent must have checked in this recently to be handed a slot. */
-export const PRESENCE_TIMEOUT_MS = 90000;
-const HEARTBEAT_MS = 25000;
 
 export function clampMinutes(v, fallback) {
   const n = Number(v);
@@ -80,36 +37,45 @@ export function clampMinutes(v, fallback) {
   return Math.min(MAX_BREAK_MINUTES, Math.max(1, Math.round(n)));
 }
 
-/* ---------- config resolution --------------------------------------- */
-function resolveConfig() {
-  const hash = new URLSearchParams(location.hash.slice(1));
-  const enc = hash.get("cfg");
-  if (enc) {
-    try {
-      const json = decodeURIComponent(escape(atob(enc.replace(/-/g, "+").replace(/_/g, "/"))));
-      const cfg = JSON.parse(json);
-      if (cfg && cfg.databaseURL) {
-        localStorage.setItem(LS_CFG, JSON.stringify(cfg));
-        history.replaceState(null, "", location.pathname + location.search);
-        return cfg;
-      }
-    } catch (e) { console.warn("Bad #cfg payload", e); }
-  }
-  try {
-    const saved = JSON.parse(localStorage.getItem(LS_CFG) || "null");
-    if (saved && saved.databaseURL) return saved;
-  } catch (e) { /* ignore */ }
-  if (FIREBASE_CONFIG && FIREBASE_CONFIG.databaseURL) return FIREBASE_CONFIG;
-  return null;
+/* ---------- passwords ----------------------------------------------
+   PBKDF2-SHA256 via the built-in Web Crypto, so no libraries. Needs a
+   secure context, which https and localhost both are.
+   ------------------------------------------------------------------ */
+const PBKDF2_ROUNDS = 120000;
+
+function toHex(bytes) {
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function fromHex(hex) {
+  const out = new Uint8Array(String(hex).length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(String(hex).substr(i * 2, 2), 16);
+  return out;
 }
 
-export function encodeConfig(cfg) {
-  return btoa(unescape(encodeURIComponent(JSON.stringify(cfg))))
-    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+export async function hashPassword(password, saltHex) {
+  const salt = saltHex ? fromHex(saltHex) : crypto.getRandomValues(new Uint8Array(16));
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(String(password)), "PBKDF2", false, ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: salt, iterations: PBKDF2_ROUNDS, hash: "SHA-256" }, key, 256
+  );
+  return { salt: toHex(salt), hash: toHex(new Uint8Array(bits)) };
 }
-export function saveConfig(cfg) { localStorage.setItem(LS_CFG, JSON.stringify(cfg)); }
-export function clearConfig() { localStorage.removeItem(LS_CFG); }
-export function activeConfig() { return resolveConfig(); }
+
+async function verifyPassword(password, saltHex, hashHex) {
+  if (!saltHex || !hashHex) return false;
+  const { hash } = await hashPassword(password, saltHex);
+  /* length-safe comparison; not timing-critical here but cheap to do */
+  if (hash.length !== hashHex.length) return false;
+  let diff = 0;
+  for (let i = 0; i < hash.length; i++) diff |= hash.charCodeAt(i) ^ hashHex.charCodeAt(i);
+  return diff === 0;
+}
+
+export function normUsername(u) {
+  return String(u || "").trim().toLowerCase().replace(/\s+/g, "");
+}
 
 /* ---------- event bus ----------------------------------------------- */
 function bus() {
@@ -127,9 +93,8 @@ function withDefaults(s) {
       teamName: DEFAULTS.teamName,
       globalMaxConcurrent: DEFAULTS.globalMaxConcurrent,
       graceMinutes: DEFAULTS.graceMinutes,
-      hasAdmin: false
+      kioskTimeoutSec: DEFAULTS.kioskTimeoutSec
     }, st.settings || {}),
-    admins: st.admins || {},
     breakTypes: st.breakTypes || {},
     agents: st.agents || {},
     sessions: st.sessions || {}
@@ -141,389 +106,216 @@ function withDefaults(s) {
    ================================================================== */
 class Store {
   constructor() {
-    this.mode = "connecting";      // connecting | firebase | local | error
     this.state = withDefaults(null);
-    this.offset = 0;
-    this.online = false;
-    this.lastError = null;
-
-    /* auth */
-    this.user = null;              // { uid, email, name, photo }  (null = signed out)
-    this.member = null;            // roster record for this.user, once resolved
-    this.access = "unknown";       // unknown | signed-out | ok | no-account | error
-
+    this.user = null;              // signed-in account record
+    this.access = "unknown";       // unknown | setup | signed-out | ok
     this._changes = bus();
     this._status = bus();
     this._errors = bus();
-    this._fb = null;
-    this._subscribed = false;
   }
 
-  onChange(fn) {
-    const off = this._changes.on(fn);
-    if (this._subscribed || this.mode === "local") fn(this.state);
-    return off;
-  }
+  onChange(fn) { const off = this._changes.on(fn); fn(this.state); return off; }
   onStatus(fn) { const off = this._status.on(fn); fn(this.statusSnapshot()); return off; }
   onError(fn) { return this._errors.on(fn); }
 
-  statusSnapshot() {
-    return {
-      mode: this.mode, online: this.online, access: this.access,
-      user: this.user, member: this.member
-    };
-  }
-  now() { return Date.now() + this.offset; }
-  isAdmin() { return !!(this.user && isAdminEmail(this.state, this.user.email)); }
+  statusSnapshot() { return { access: this.access, user: this.user }; }
+  now() { return Date.now(); }
+  isAdmin() { return !!(this.user && this.user.role === ROLES.ADMIN); }
   uid() { return this.user ? this.user.uid : null; }
+  get member() { return this.user; }
 
   _emit() { this._changes.emit(this.state); }
   _pushStatus() { this._status.emit(this.statusSnapshot()); }
   _fail(err, what) {
-    this.lastError = err;
-    const denied = /permission|PERMISSION_DENIED/i.test(err && (err.message || err.code) || "");
-    this._errors.emit({ error: err, what: what, denied: denied });
-    console.warn("BreakFlow write failed:", what, err);
+    this._errors.emit({ error: err, what: what });
+    console.warn("BreakFlow:", what, err);
   }
 
-  /* ---------------- connect ---------------- */
+  /* ---------------- load / save ---------------- */
   async connect() {
-    const cfg = resolveConfig();
-    if (!cfg) {
-      /* Don't quietly pretend to work. Demo mode is opt-in, and it
-         remembers the choice so a reload doesn't kick you out of it. */
-      if (localStorage.getItem(LS_DEMO) === "1") { await this._connectLocal(); return this.mode; }
-      this.mode = "unconfigured";
-      this.access = "unconfigured";
-      this._pushStatus();
-      return this.mode;
-    }
-    try {
-      await this._connectFirebase(cfg);
-    } catch (err) {
-      console.error("Firebase connect failed:", err);
-      this.lastError = err;
-      this.mode = "error";
-      this.access = "error";
-      this._pushStatus();
-    }
-    return this.mode;
-  }
-
-  async _connectFirebase(cfg) {
-    const [appMod, dbMod, authMod] = await Promise.all([
-      import(SDK + "/firebase-app.js"),
-      import(SDK + "/firebase-database.js"),
-      import(SDK + "/firebase-auth.js")
-    ]);
-    const app = appMod.initializeApp(cfg);
-    const db = dbMod.getDatabase(app);
-    const auth = authMod.getAuth(app);
-    this._fb = { db, m: dbMod, auth, am: authMod, app };
-    this.mode = "firebase";
-
-    /* a redirect sign-in may be completing right now */
-    try { await authMod.getRedirectResult(auth); } catch (e) { this._fail(e, "sign-in"); }
-
-    dbMod.onValue(dbMod.ref(db, ".info/serverTimeOffset"), (s) => { this.offset = s.val() || 0; });
-    dbMod.onValue(dbMod.ref(db, ".info/connected"), (s) => { this.online = !!s.val(); this._pushStatus(); });
-
-    await new Promise((resolve) => {
-      let first = true;
-      authMod.onAuthStateChanged(auth, async (u) => {
-        this.user = u ? { uid: u.uid, email: u.email || "", name: u.displayName || (u.email || "").split("@")[0], photo: u.photoURL || "" } : null;
-        if (!u) {
-          this.member = null;
-          this.access = "signed-out";
-          this._detach();
-          this.state = withDefaults(null);
-          this._pushStatus();
-          this._emit();
-        } else {
-          await this._afterSignIn();
-        }
-        if (first) { first = false; resolve(); }
-      });
+    this._load();
+    /* another tab changed things - pick it up */
+    addEventListener("storage", (e) => {
+      if (e.key === LS_DATA) { this._load(true); this._emit(); this._pushStatus(); }
+      if (e.key === LS_SESSION) { this._resume(); this._pushStatus(); this._emit(); }
     });
-  }
-
-  _detach() {
-    if (this._off) { try { this._off(); } catch (e) { /* ignore */ } this._off = null; }
-    if (this._heartbeat) { clearInterval(this._heartbeat); this._heartbeat = null; }
-    this._subscribed = false;
-  }
-
-  /** Subscribe to the board, then make sure this user has a roster record. */
-  async _afterSignIn() {
-    const { db, m } = this._fb;
-    const root = m.ref(db, DB_ROOT);
-
-    await new Promise((resolve) => {
-      let settled = false;
-      this._off = m.onValue(root, (snap) => {
-        this.state = withDefaults(snap.val());
-        this._subscribed = true;
-        this.member = (this.state.agents || {})[this.user.uid] || null;
-        if (this.access !== "no-account") this.access = this.member ? "ok" : this.access;
-        this._pushStatus();
-        this._emit();
-        if (!settled) { settled = true; resolve(); }
-      }, (err) => {
-        /* rules refused the read: not a member and the roster is locked */
-        this._subscribed = false;
-        this.access = /permission/i.test(err.message || "") ? "no-account" : "error";
-        this.lastError = err;
-        this._pushStatus();
-        if (!settled) { settled = true; resolve(); }
-      });
-    });
-
-    if (!this._subscribed) return;
-    await this._ensureMembership();
-    await this._seedIfEmpty();
-
-    this._heartbeat = setInterval(() => this.touch(), HEARTBEAT_MS);
-    this.touch();
-  }
-
-  /**
-   * Find this user's roster record. Nobody self-enrols: accounts are
-   * created by an admin, which writes the record at the same time.
-   * The single exception is the very first account on a fresh board.
-   */
-  async _ensureMembership() {
-    const uid = this.user.uid;
-    const email = this.user.email || "";
-
-    if (this.state.agents[uid]) {
-      this.member = this.state.agents[uid];
-      this.access = "ok";
-      this._pushStatus();
-      return;
-    }
-
-    /* Fresh database: this account claims it as the owner. */
-    const bootstrap = !Object.keys(this.state.admins || {}).length;
-    if (!bootstrap) {
-      this.access = "no-account";
-      this._pushStatus();
-      return;
-    }
-
-    const rec = {
-      uid: uid,
-      name: (this._pendingProfile && this._pendingProfile.name) || displayLogin(email) || "Owner",
-      email: email,
-      team: "",
-      createdAt: Date.now(),
-      lastSeen: Date.now()
-    };
-    try {
-      await this.update({
-        ["agents/" + uid]: rec,
-        ["admins/" + emailKey(email)]: true,
-        setupDone: true
-      }, "set up the board");
-      this.member = rec;
-      this.access = "ok";
-      this.bootstrapped = true;
-    } catch (e) {
-      this.access = "no-account";
-    }
-    this._pendingProfile = null;
+    this._resume();
     this._pushStatus();
+    this._emit();
+    return "local";
   }
 
-  /**
-   * First run only: put the default break policies in place.
-   * Writes individual keys rather than a whole settings object - a
-   * blind overwrite could reset hasAdmin and leave the board claimable.
-   */
-  async _seedIfEmpty() {
-    if (Object.keys(this.state.breakTypes || {}).length) return;
-    if (!this.isAdmin()) return;
-    await this.update({
-      "settings/hasAdmin": true,
-      "settings/teamName": this.state.settings.teamName || DEFAULTS.teamName,
-      "settings/globalMaxConcurrent": DEFAULTS.globalMaxConcurrent,
-      "settings/graceMinutes": DEFAULTS.graceMinutes,
-      "settings/createdAt": Date.now(),
-      breakTypes: DEFAULTS.breakTypes
-    }, "set up the board");
+  _load(keepSession) {
+    let raw = null;
+    try { raw = JSON.parse(localStorage.getItem(LS_DATA) || "null"); } catch (e) { /* ignore */ }
+    if (!raw) {
+      raw = {
+        settings: {
+          teamName: DEFAULTS.teamName,
+          globalMaxConcurrent: DEFAULTS.globalMaxConcurrent,
+          graceMinutes: DEFAULTS.graceMinutes,
+          kioskTimeoutSec: DEFAULTS.kioskTimeoutSec,
+          createdAt: Date.now()
+        },
+        breakTypes: DEFAULTS.breakTypes,
+        agents: {},
+        sessions: {}
+      };
+      localStorage.setItem(LS_DATA, JSON.stringify(raw));
+    }
+    this.state = withDefaults(raw);
+    if (!keepSession && !Object.keys(this.state.agents).length) this.access = "setup";
   }
 
-  /** Presence heartbeat: an absent agent is passed over in the queue. */
-  async touch() {
-    if (!this.user || !this.member) return;
-    try { await this.update({ ["agents/" + this.user.uid + "/lastSeen"]: Date.now() }); }
-    catch (e) { /* not fatal */ }
+  _save() {
+    try { localStorage.setItem(LS_DATA, JSON.stringify(this.state)); }
+    catch (e) { this._fail(e, "save to this browser"); throw e; }
+    this._emit();
   }
 
-  /* ---------------- sign in / out ---------------- */
+  /** Restore the signed-in account from the last session, if any. */
+  _resume() {
+    const uid = localStorage.getItem(LS_SESSION);
+    if (!Object.keys(this.state.agents).length) { this.user = null; this.access = "setup"; return; }
+    if (uid && this.state.agents[uid]) {
+      this.user = this.state.agents[uid];
+      this.access = "ok";
+    } else {
+      this.user = null;
+      this.access = "signed-out";
+    }
+  }
+
+  /* ---------------- accounts ---------------- */
+  needsSetup() { return !Object.keys(this.state.agents || {}).length; }
+
+  findByUsername(username) {
+    const u = normUsername(username);
+    return sortedAgents(this.state).find((a) => normUsername(a.username) === u) || null;
+  }
+
   async signIn(username, password) {
-    if (this.mode === "local") return;
-    const { auth, am } = this._fb;
-    await am.signInWithEmailAndPassword(auth, loginEmail(username), password);
-  }
-
-  /** Has anyone claimed this board yet? Readable before signing in. */
-  async setupDone() {
-    if (this.mode !== "firebase") return true;
-    const { db, m } = this._fb;
-    try {
-      const snap = await m.get(m.ref(db, DB_ROOT + "/setupDone"));
-      return snap.exists() && snap.val() === true;
-    } catch (e) {
-      /* can't tell - assume set up, so we never show setup to an agent */
-      return true;
-    }
-  }
-
-  /** One-time: create the owner account on a fresh database. */
-  async createFirstAdmin(username, name, password) {
-    const { auth, am } = this._fb;
-    if (await this.setupDone()) throw new Error("This board has already been set up.");
-    this._pendingProfile = { name: name };
-    await am.createUserWithEmailAndPassword(auth, loginEmail(username), password);
-  }
-
-  /**
-   * Admin creates an account for someone else.
-   *
-   * The client SDK's createUser signs you in as the new user, which
-   * would kick the admin out of their own session. Doing it on a
-   * second app instance keeps auth state separate, so the admin stays
-   * exactly where they were.
-   */
-  async createAccount(opts) {
-    if (this.mode !== "firebase") throw new Error("Connect a Firebase database first — the local demo has no accounts.");
-    if (!this.isAdmin()) throw new Error("Admins only.");
-    const email = loginEmail(opts.username);
-    if (!email) throw new Error("A username is required.");
-    if (sortedAgents(this.state).some((a) => (a.email || "").toLowerCase() === email)) {
-      throw new Error("That username is already taken.");
-    }
-    const [appMod, authMod] = await Promise.all([
-      import(SDK + "/firebase-app.js"),
-      import(SDK + "/firebase-auth.js")
-    ]);
-    const alias = "provision-" + Date.now().toString(36);
-    const secondary = appMod.initializeApp(this._fb.app.options, alias);
-    const auth2 = authMod.getAuth(secondary);
-    try {
-      const cred = await authMod.createUserWithEmailAndPassword(auth2, email, opts.password);
-      const uid = cred.user.uid;
-      const patch = {
-        ["agents/" + uid]: {
-          uid: uid,
-          name: opts.name || displayLogin(email),
-          email: email,
-          team: opts.team || "",
-          createdAt: Date.now(),
-          lastSeen: 0
-        }
-      };
-      if (opts.makeAdmin) patch["admins/" + emailKey(email)] = true;
-      await this.update(patch, "create the account");
-      return { uid: uid, email: email };
-    } finally {
-      try { await authMod.signOut(auth2); } catch (e) { /* ignore */ }
-      try { await appMod.deleteApp(secondary); } catch (e) { /* ignore */ }
-    }
-  }
-
-  /** Change your own password (you must know the current one). */
-  async changeMyPassword(current, next) {
-    const { auth, am } = this._fb;
-    const u = auth.currentUser;
-    if (!u) throw new Error("Not signed in.");
-    const cred = am.EmailAuthProvider.credential(u.email, current);
-    await am.reauthenticateWithCredential(u, cred);
-    await am.updatePassword(u, next);
-  }
-
-  /** Only possible for real email addresses, not synthetic usernames. */
-  async sendResetEmail(email) {
-    if (isSyntheticEmail(email)) throw new Error("That account uses a username, not an email address, so there is nowhere to send a reset link.");
-    const { auth, am } = this._fb;
-    await am.sendPasswordResetEmail(auth, email);
-  }
-
-  async signOut() {
-    if (this.mode === "local") return;
-    this._detach();
-    try { await this._fb.am.signOut(this._fb.auth); } catch (e) { this._fail(e, "sign-out"); }
-  }
-
-  /* ---------------- local demo ---------------- */
-  startLocalDemo() { localStorage.setItem(LS_DEMO, "1"); location.reload(); }
-  exitLocalDemo() {
-    localStorage.removeItem(LS_DEMO);
-    localStorage.removeItem(LS_DATA);
-    location.reload();
-  }
-
-  async _connectLocal() {
-    this.mode = "local";
-    this.online = true;
-    this.user = { uid: "local-user", email: "you@breakflow.local", name: "You (local demo)", photo: "" };
-    const load = () => {
-      let raw = null;
-      try { raw = JSON.parse(localStorage.getItem(LS_DATA) || "null"); } catch (e) { /* ignore */ }
-      const demoUser = {
-        uid: "local-user", name: "You (local demo)", email: "you@breakflow.local",
-        team: "", createdAt: Date.now(), lastSeen: Date.now()
-      };
-      if (!raw || !raw.breakTypes || !Object.keys(raw.breakTypes).length) {
-        raw = {
-          settings: {
-            teamName: DEFAULTS.teamName, globalMaxConcurrent: DEFAULTS.globalMaxConcurrent,
-            graceMinutes: DEFAULTS.graceMinutes, hasAdmin: true
-          },
-          admins: { [emailKey(demoUser.email)]: true },
-          breakTypes: DEFAULTS.breakTypes,
-          agents: { "local-user": demoUser },
-          sessions: {}
-        };
-        localStorage.setItem(LS_DATA, JSON.stringify(raw));
-      }
-      this.state = withDefaults(raw);
-      /* keep the demo usable against data saved by an older version */
-      let repair = false;
-      if (!this.state.agents["local-user"]) { this.state.agents["local-user"] = demoUser; repair = true; }
-      if (!this.state.admins[emailKey(demoUser.email)]) {
-        this.state.admins[emailKey(demoUser.email)] = true;
-        repair = true;
-      }
-      if (repair) localStorage.setItem(LS_DATA, JSON.stringify(this.state));
-      this.member = this.state.agents["local-user"];
-      this.access = "ok";
-    };
-    load();
-    addEventListener("storage", (e) => { if (e.key === LS_DATA) { load(); this._emit(); } });
-    this._subscribed = true;
-    setInterval(() => this.touch(), HEARTBEAT_MS);
-    this._emit();
+    const rec = this.findByUsername(username);
+    if (!rec) throw new Error("No account with that username.");
+    const ok = await verifyPassword(password, rec.salt, rec.hash);
+    if (!ok) throw new Error("Wrong password.");
+    localStorage.setItem(LS_SESSION, rec.uid);
+    this.touch();
+    this.user = rec;
+    this.access = "ok";
     this._pushStatus();
+    this._emit();
+    return rec;
   }
 
-  _saveLocal() {
-    localStorage.setItem(LS_DATA, JSON.stringify(this.state));
+  signOut() {
+    localStorage.removeItem(LS_SESSION);
+    this.user = null;
+    this.access = this.needsSetup() ? "setup" : "signed-out";
+    this._pushStatus();
     this._emit();
+  }
+
+  touch() { try { localStorage.setItem(LS_ACTIVE, String(Date.now())); } catch (e) { /* ignore */ } }
+  lastActive() { return Number(localStorage.getItem(LS_ACTIVE) || 0); }
+
+  newId() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  }
+
+  /** Create an account. First one is forced to admin so you can't lock yourself out. */
+  async createAccount(opts) {
+    const username = normUsername(opts.username);
+    if (!username) throw new Error("A username is required.");
+    if (!/^[a-z0-9._-]{2,32}$/.test(username)) {
+      throw new Error("Usernames can use letters, numbers, dot, dash and underscore (2-32 characters).");
+    }
+    if (this.findByUsername(username)) throw new Error("That username is already taken.");
+    if (String(opts.password || "").length < 4) throw new Error("Password must be at least 4 characters.");
+
+    const first = this.needsSetup();
+    if (!first && !this.isAdmin()) throw new Error("Only an admin can create accounts.");
+
+    const { salt, hash } = await hashPassword(opts.password);
+    const uid = this.newId();
+    this.state.agents[uid] = {
+      uid: uid,
+      username: username,
+      name: String(opts.name || "").trim() || username,
+      team: String(opts.team || "").trim(),
+      role: first ? ROLES.ADMIN : (opts.role === ROLES.ADMIN ? ROLES.ADMIN : ROLES.AGENT),
+      salt: salt, hash: hash,
+      createdAt: Date.now()
+    };
+    this._save();
+    return this.state.agents[uid];
+  }
+
+  /** Admin sets someone's password, or you change your own. */
+  async setPassword(uid, password, currentPassword) {
+    const rec = this.state.agents[uid];
+    if (!rec) throw new Error("No such account.");
+    const isSelf = this.user && this.user.uid === uid;
+    if (!this.isAdmin() && !isSelf) throw new Error("Not allowed.");
+    if (isSelf && !this.isAdmin()) {
+      const ok = await verifyPassword(currentPassword, rec.salt, rec.hash);
+      if (!ok) throw new Error("Your current password is wrong.");
+    }
+    if (String(password || "").length < 4) throw new Error("Password must be at least 4 characters.");
+    const { salt, hash } = await hashPassword(password);
+    rec.salt = salt;
+    rec.hash = hash;
+    rec.passwordChangedAt = Date.now();
+    this._save();
+  }
+
+  async updateAccount(uid, patch) {
+    const rec = this.state.agents[uid];
+    if (!rec) throw new Error("No such account.");
+    const isSelf = this.user && this.user.uid === uid;
+    if (!this.isAdmin() && !isSelf) throw new Error("Not allowed.");
+
+    if (patch.username !== undefined) {
+      const username = normUsername(patch.username);
+      if (!username) throw new Error("A username is required.");
+      const clash = this.findByUsername(username);
+      if (clash && clash.uid !== uid) throw new Error("That username is already taken.");
+      rec.username = username;
+    }
+    if (patch.name !== undefined) {
+      const name = String(patch.name).trim();
+      if (!name) throw new Error("A name is required.");
+      rec.name = name;
+    }
+    if (patch.team !== undefined) rec.team = String(patch.team).trim();
+    if (patch.role !== undefined) {
+      if (!this.isAdmin()) throw new Error("Only an admin can change roles.");
+      const next = patch.role === ROLES.ADMIN ? ROLES.ADMIN : ROLES.AGENT;
+      if (next === ROLES.AGENT && rec.role === ROLES.ADMIN && admins(this.state).length <= 1) {
+        throw new Error("Keep at least one admin.");
+      }
+      rec.role = next;
+    }
+    this._save();
+    if (isSelf) { this.user = rec; this._pushStatus(); }
+    return rec;
+  }
+
+  async deleteAccount(uid) {
+    if (!this.isAdmin()) throw new Error("Only an admin can remove accounts.");
+    const rec = this.state.agents[uid];
+    if (!rec) return;
+    if (rec.role === ROLES.ADMIN && admins(this.state).length <= 1) {
+      throw new Error("Keep at least one admin.");
+    }
+    delete this.state.agents[uid];
+    this._save();
+    if (this.user && this.user.uid === uid) this.signOut();
   }
 
   /* ---------------- writes ---------------- */
-  /** patch: { "a/b/c": value }  — value null deletes. Throws on refusal. */
-  async update(patch, what) {
-    if (this.mode === "firebase") {
-      const { db, m } = this._fb;
-      try {
-        return await m.update(m.ref(db, DB_ROOT), patch);
-      } catch (e) {
-        this._fail(e, what || "save");
-        throw e;
-      }
-    }
+  /** patch: { "a/b/c": value }  - null deletes. */
+  update(patch) {
     for (const [k, v] of Object.entries(patch)) {
       const parts = k.split("/").filter(Boolean);
       if (!parts.length) continue;
@@ -538,17 +330,35 @@ class Store {
         node[leaf] = Object.assign(node[leaf] || {}, v);
       } else node[leaf] = v;
     }
-    this._saveLocal();
+    this._save();
   }
 
-  async remove(path) { return this.update({ [path]: null }); }
+  /* ---------------- backup ---------------- */
+  exportJSON() {
+    return JSON.stringify({
+      breakflow: 1,
+      exportedAt: new Date().toISOString(),
+      data: this.state
+    }, null, 2);
+  }
 
-  newId(prefix) {
-    if (this.mode === "firebase") {
-      const { db, m } = this._fb;
-      return m.push(m.ref(db, DB_ROOT + "/" + prefix)).key;
+  /** Replace everything with a backup file. Signs out afterwards. */
+  importJSON(text) {
+    let parsed;
+    try { parsed = JSON.parse(text); } catch (e) { throw new Error("That file isn't valid JSON."); }
+    const data = parsed && parsed.data ? parsed.data : parsed;
+    if (!data || typeof data !== "object" || !data.agents || !data.breakTypes) {
+      throw new Error("That doesn't look like a BreakFlow backup.");
     }
-    return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    this.state = withDefaults(data);
+    this._save();
+    this.signOut();
+  }
+
+  wipeEverything() {
+    localStorage.removeItem(LS_DATA);
+    localStorage.removeItem(LS_SESSION);
+    localStorage.removeItem(LS_ACTIVE);
   }
 }
 
@@ -567,11 +377,7 @@ export function graceMs(state) {
   return (g === undefined || g === null ? 3 : Number(g)) * 60000;
 }
 
-/**
- * Purely time-based, so slot maths never depends on someone's browser
- * having written the "over" flag. A break holds its slot until its end
- * time plus the grace period.
- */
+/** Time-based, so slot maths never depends on a status flag being written. */
 export function occupiesSlot(s, g, now) {
   if (!s) return false;
   if (CLOSED.indexOf(s.state) >= 0) return false;
@@ -579,7 +385,6 @@ export function occupiesSlot(s, g, now) {
   return now < (s.endsAt || 0) + g;
 }
 
-/** Is this break past its end time (regardless of what the flag says)? */
 export function isOver(s, now) {
   return !!s && OPEN.indexOf(s.state) >= 0 && s.state !== STATES.QUEUED && now > (s.endsAt || 0);
 }
@@ -622,14 +427,10 @@ export function sortedAgents(state) {
     .sort((a, b) => String(a.name).localeCompare(String(b.name)));
 }
 
-export function supervisors(state) {
-  return sortedAgents(state).filter((a) => isAdminAgent(state, a));
+export function admins(state) {
+  return sortedAgents(state).filter((a) => a.role === ROLES.ADMIN);
 }
-
-export function isPresent(state, uid, now) {
-  const a = (state.agents || {})[uid];
-  return !!(a && a.lastSeen && now - a.lastSeen < PRESENCE_TIMEOUT_MS);
-}
+export const supervisors = admins;
 
 export function mySession(state, uid) {
   return listSessions(state)
@@ -644,18 +445,9 @@ export function queuePosition(state, session) {
 
 /* ==================================================================
    Queue engine
-
-   plan() is a pure function of (state, now). Every client computes the
-   same answer from the same snapshot, so clients can each write only
-   their own session and still agree on who goes next - no shared
-   transaction, which is what lets the security rules be strict.
    ================================================================== */
 
-/**
- * Decide which queued sessions should start now.
- * Absent agents (no recent heartbeat) are passed over without losing
- * their place, so a closed laptop can't hold up the floor.
- */
+/** Which queued breaks should start now, and which have run out. */
 export function plan(state, now) {
   const g = graceMs(state);
   const globalMax = Number(state.settings.globalMaxConcurrent === undefined ? 3 : state.settings.globalMaxConcurrent);
@@ -671,7 +463,6 @@ export function plan(state, now) {
   }
 
   const start = [];
-  const skipped = [];
   for (const s of queueFor(state)) {
     const bt = types[s.breakTypeId];
     if (!bt) continue;
@@ -679,134 +470,103 @@ export function plan(state, now) {
     if (total >= globalMax) break;
     const cap = Number(bt.maxConcurrent === undefined ? 1 : bt.maxConcurrent);
     if ((perType[bt.id] || 0) >= cap) continue;
-    if (!isPresent(state, s.agentId, now)) { skipped.push(s); continue; }
     start.push(s);
     perType[bt.id] = (perType[bt.id] || 0) + 1;
     total++;
   }
 
-  /* breaks whose clock has run out but whose flag still says active */
   const expire = listSessions(state).filter((s) => s.state === STATES.ACTIVE && s.endsAt && s.endsAt <= now);
-
-  return { start, expire, skipped };
+  return { start, expire };
 }
 
-/* A decision must hold for two consecutive ticks before we act on it,
-   so a stale snapshot can't hand the same slot to two people. */
-let lastDecision = "";
-
-/**
- * Apply the parts of the plan this client is allowed to write:
- * its own session always, everyone's if it is an admin.
- */
-export async function reconcile() {
-  if (!store._subscribed && store.mode !== "local") return;
+export function reconcile() {
   const now = store.now();
-  const uid = store.uid();
-  const admin = store.isAdmin();
   const p = plan(store.state, now);
-
-  const mine = (s) => s.agentId === uid;
-  const startable = p.start.filter((s) => admin || mine(s));
-  const expirable = p.expire.filter((s) => admin || mine(s));
-  if (!startable.length && !expirable.length) { lastDecision = ""; return; }
-
-  const key = startable.map((s) => s.id).join(",") + "|" + expirable.map((s) => s.id).join(",");
-  if (key !== lastDecision) { lastDecision = key; return; }   /* wait one tick */
-
+  if (!p.start.length && !p.expire.length) return;
   const patch = {};
-  for (const s of expirable) patch["sessions/" + s.id + "/state"] = STATES.OVER;
-  for (const s of startable) {
+  for (const s of p.expire) patch["sessions/" + s.id + "/state"] = STATES.OVER;
+  for (const s of p.start) {
     const bt = (store.state.breakTypes || {})[s.breakTypeId] || {};
     const mins = clampMinutes(s.minutes || bt.minutes, 10);
     patch["sessions/" + s.id + "/state"] = STATES.ACTIVE;
     patch["sessions/" + s.id + "/startedAt"] = now;
     patch["sessions/" + s.id + "/endsAt"] = now + mins * 60000;
   }
-  lastDecision = "";
-  try { await store.update(patch, "queue update"); } catch (e) { /* surfaced by store */ }
+  store.update(patch);
 }
 
-/* ==================================================================
-   Actions
-   ================================================================== */
+/* ---------- actions ------------------------------------------------- */
 
-export async function requestBreak(agent, bt) {
+export function requestBreak(agent, bt) {
   const now = store.now();
   const open = listSessions(store.state).filter((s) => s.agentId === agent.uid && OPEN.indexOf(s.state) >= 0);
   if (open.length) throw new Error("You already have a break open.");
-  const id = store.newId("sessions");
-  await store.update({
+  const id = store.newId();
+  store.update({
     ["sessions/" + id]: {
       agentId: agent.uid, agentName: agent.name, team: agent.team || "",
       breakTypeId: bt.id, breakTypeName: bt.name, minutes: clampMinutes(bt.minutes, 10),
       state: STATES.QUEUED, requestedAt: now, day: dayKey(now)
     }
-  }, "request break");
-  await reconcile();
-  await reconcile();   /* the two-tick guard: a free slot starts immediately */
+  });
+  reconcile();
   return id;
 }
 
-export async function endBreak(sessionId, by) {
+export function endBreak(sessionId, by) {
   const now = store.now();
   const s = (store.state.sessions || {})[sessionId];
   if (!s) return;
-  const over = Math.max(0, now - (s.endsAt || now));
-  await store.update({
+  store.update({
     ["sessions/" + sessionId + "/state"]: STATES.DONE,
     ["sessions/" + sessionId + "/endedAt"]: now,
-    ["sessions/" + sessionId + "/overBy"]: over,
+    ["sessions/" + sessionId + "/overBy"]: Math.max(0, now - (s.endsAt || now)),
     ["sessions/" + sessionId + "/closedBy"]: by || "agent"
-  }, "close break");
-  await reconcile();
+  });
+  reconcile();
 }
 
-export async function cancelQueued(sessionId, by) {
-  await store.update({
+export function cancelQueued(sessionId, by) {
+  store.update({
     ["sessions/" + sessionId + "/state"]: STATES.CANCELLED,
     ["sessions/" + sessionId + "/endedAt"]: store.now(),
     ["sessions/" + sessionId + "/closedBy"]: by || "agent"
-  }, "leave queue");
-  await reconcile();
+  });
+  reconcile();
 }
 
-export async function denyQueued(sessionId, by, reason) {
-  await store.update({
+export function denyQueued(sessionId, by, reason) {
+  store.update({
     ["sessions/" + sessionId + "/state"]: STATES.DENIED,
     ["sessions/" + sessionId + "/endedAt"]: store.now(),
     ["sessions/" + sessionId + "/closedBy"]: by || "admin",
     ["sessions/" + sessionId + "/reason"]: reason || ""
-  }, "deny request");
-  await reconcile();
+  });
+  reconcile();
 }
 
-export async function approveQueued(sessionId, by) {
-  await store.update({ ["sessions/" + sessionId + "/approvedBy"]: by || "admin" }, "approve request");
-  await reconcile();
+export function approveQueued(sessionId, by) {
+  store.update({ ["sessions/" + sessionId + "/approvedBy"]: by || "admin" });
+  reconcile();
 }
 
-/** Supervisor override: skip the queue and start now. */
-export async function forceStart(sessionId, by) {
+export function forceStart(sessionId, by) {
   const now = store.now();
   const s = (store.state.sessions || {})[sessionId];
   if (!s) return;
   const bt = (store.state.breakTypes || {})[s.breakTypeId] || {};
   const mins = clampMinutes(s.minutes || bt.minutes, 10);
-  await store.update({
+  store.update({
     ["sessions/" + sessionId + "/state"]: STATES.ACTIVE,
     ["sessions/" + sessionId + "/startedAt"]: now,
     ["sessions/" + sessionId + "/endsAt"]: now + mins * 60000,
     ["sessions/" + sessionId + "/approvedBy"]: by || "admin",
     ["sessions/" + sessionId + "/forced"]: true
-  }, "start break");
+  });
 }
 
-/**
- * Extend or shorten a running break, never past MAX_BREAK_MINUTES total.
- * Returns { applied, clamped }.
- */
-export async function adjustTime(sessionId, deltaMinutes) {
+/** Never stretches a break past MAX_BREAK_MINUTES of planned time. */
+export function adjustTime(sessionId, deltaMinutes) {
   const s = (store.state.sessions || {})[sessionId];
   if (!s) return { applied: 0, clamped: false };
   const now = store.now();
@@ -825,17 +585,16 @@ export async function adjustTime(sessionId, deltaMinutes) {
     ["sessions/" + sessionId + "/adjusted"]: (s.adjusted || 0) + Math.round((endsAt - base) / 60000)
   };
   if (endsAt > now && s.state === STATES.OVER) patch["sessions/" + sessionId + "/state"] = STATES.ACTIVE;
-  await store.update(patch, "adjust break");
-  await reconcile();
+  store.update(patch);
+  reconcile();
   return { applied: Math.round((endsAt - base) / 60000), clamped: clamped };
 }
 
-/** Supervisor puts someone on break directly, no queue. */
-export async function startForAgent(agent, bt, by) {
+export function startForAgent(agent, bt, by) {
   const now = store.now();
-  const id = store.newId("sessions");
+  const id = store.newId();
   const mins = clampMinutes(bt.minutes, 10);
-  await store.update({
+  store.update({
     ["sessions/" + id]: {
       agentId: agent.uid, agentName: agent.name, team: agent.team || "",
       breakTypeId: bt.id, breakTypeName: bt.name, minutes: mins,
@@ -843,7 +602,7 @@ export async function startForAgent(agent, bt, by) {
       endsAt: now + mins * 60000, day: dayKey(now),
       approvedBy: by || "admin", forced: true
     }
-  }, "start break");
+  });
   return id;
 }
 
@@ -855,7 +614,7 @@ export function dayKey(ts) {
     String(d.getDate()).padStart(2, "0");
 }
 
-/** Rough "you're up at ~" estimate for a queued session. */
+/** Rough "you're up at ~" estimate for a queued break. */
 export function estimateStart(state, session, now) {
   const bt = (state.breakTypes || {})[session.breakTypeId];
   if (!bt) return null;
