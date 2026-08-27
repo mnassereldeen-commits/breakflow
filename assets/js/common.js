@@ -372,14 +372,14 @@ export function signInGate(teamName, mode) {
         onclick: (e) => { e.preventDefault(); troubleDialog(); }
       })
     ]),
-    /* A device that only has the shipped owner account has never been
+    /* A team that only has the shipped owner account has never been
        set up. Say so, rather than letting an agent hit "no account with
        that username" and assume the site is broken. */
     sortedAgents(store.state).length <= 1
       ? el("div", { class: "callout", style: { marginTop: "16px" } }, [
-        el("b", { text: "This device has its own separate board." }),
+        el("b", { text: "No agent accounts yet." }),
         el("div", { class: "small", style: { marginTop: "4px" } }, [
-          "No agent accounts have been created here yet. BreakFlow stores everything in the browser it runs in, so accounts made on another computer don't exist on this one — sign in on the PC your supervisor set up."
+          "Ask your supervisor to create your account from the Accounts tab in the admin panel."
         ])
       ])
       : null
@@ -397,13 +397,37 @@ export function noStorageGate() {
         el("h2", { text: "This browser won't let BreakFlow save" })
       ]),
       el("p", { class: "muted small", style: { marginTop: "12px" } }, [
-        "BreakFlow keeps everything in the browser's own storage, and this one is blocking it. Nothing can be signed into or recorded until that changes."
+        "BreakFlow needs to remember who's signed in on this PC, and this browser is blocking it. Nothing can be signed into until that changes."
       ]),
       el("p", { class: "muted small" }, ["Usually one of:"]),
       el("ul", { class: "small muted", style: { margin: "0 0 12px", paddingLeft: "20px" } }, [
         el("li", {}, ["you're in ", el("b", { text: "Private Browsing" }), " or an incognito window — open the site in a normal window"]),
         el("li", {}, ["the browser is set to ", el("b", { text: "block cookies and site data" }), " — allow it for this site"]),
         el("li", {}, ["storage is full — clear some space"])
+      ]),
+      el("div", { class: "btn-row", style: { justifyContent: "center" } }, [
+        el("button", { class: "btn primary", text: "Try again", onclick: () => location.reload() })
+      ])
+    ])
+  ]);
+}
+
+/** Firebase is unreachable - misconfigured project, no internet, or the service is down. */
+export function noConnectionGate() {
+  return el("div", { class: "gate" }, [
+    el("div", { class: "card pad-lg", style: { maxWidth: "460px" } }, [
+      el("div", { class: "center" }, [
+        el("div", { class: "mark big", text: "B" }),
+        el("h2", { text: "Can't reach the shared board" })
+      ]),
+      el("p", { class: "muted small", style: { marginTop: "12px" } }, [
+        "BreakFlow's data lives in the team's Firebase project, and this PC can't connect to it right now."
+      ]),
+      el("p", { class: "muted small" }, ["Usually one of:"]),
+      el("ul", { class: "small muted", style: { margin: "0 0 12px", paddingLeft: "20px" } }, [
+        el("li", {}, ["this PC is offline — check the network connection"]),
+        el("li", {}, [el("b", { text: "assets/js/config.js" }), " doesn't have the Firebase project's config filled in yet"]),
+        el("li", {}, ["the Firebase project was deleted, or Anonymous sign-in / the Realtime Database was turned off"])
       ]),
       el("div", { class: "btn-row", style: { justifyContent: "center" } }, [
         el("button", { class: "btn primary", text: "Try again", onclick: () => location.reload() })
@@ -448,8 +472,8 @@ export function setupGate() {
         msg
       ]),
       el("div", { class: "callout", style: { marginTop: "16px" } }, [
-        "This is the break board for ", el("b", { text: "this computer" }),
-        ". Everything is stored in this browser, so set it up on the PC the team will actually use, and take backups from Settings."
+        "This is your team's ", el("b", { text: "shared" }),
+        " break board — everyone on the team will sign in with the accounts you create, from whichever PC they're at. Take backups from Settings."
       ])
     ])
   ]);
@@ -487,23 +511,22 @@ export function mountKioskTimer() {
 /* ---------- status pill -------------------------------------------- */
 export function mountStatusPill(host) {
   const pill = el("button", {
-    class: "pill warn", title: "Where the data lives",
+    class: "pill ok", title: "Where the data lives",
     onclick: () => storageDialog()
-  }, [el("span", { class: "dot" }), el("span", { class: "lbl", text: "This PC only" })]);
+  }, [el("span", { class: "dot" }), el("span", { class: "lbl", text: "Shared board" })]);
   host.append(pill);
   return pill;
 }
 
 export function storageDialog() {
-  modal("This PC only", el("div", { class: "stack" }, [
-    el("p", {}, ["BreakFlow keeps everything in this browser, on this computer. There is no server and nothing to sign up for."]),
+  modal("Shared board", el("div", { class: "stack" }, [
+    el("p", {}, ["BreakFlow syncs live to every PC that opens this site — one team, one board, no matter which machine anyone signs in from."]),
     el("p", { class: "muted small" }, [
-      "So the board works for everyone who uses ", el("b", { text: "this machine" }),
-      ". An agent opening the site on their own PC or phone gets an empty app with its own separate accounts."
+      "The data lives in the team's Firebase project, not in any one browser. Accounts, break policies and the live queue are the same everywhere."
     ]),
     el("p", { class: "muted small" }, [
-      "Because there is no server, ", el("b", { text: "take backups" }),
-      " from Admin → Settings. Clearing this browser's site data deletes everything."
+      "Still worth it: ", el("b", { text: "take backups" }),
+      " from Admin → Settings, in case the project is ever deleted or its data cleared."
     ])
   ]), [{ label: "Got it", kind: "primary" }]);
 }
@@ -530,8 +553,8 @@ export function troubleDialog() {
       "Typed it right and it still won't go? Check the capitals: usernames ignore them, passwords don't."
     ]),
     el("p", { class: "muted small" }, [
-      "Accounts live in this browser, on this computer, and don't travel between machines — so make sure you're on the same PC your account was created on. This one has ",
-      el("b", { text: n === 1 ? "1 account" : n + " accounts" }), " set up."
+      "Accounts are shared across every PC on the team, so your username and password work the same wherever you sign in. There ",
+      el("b", { text: n === 1 ? "is 1 account" : "are " + n + " accounts" }), " set up right now."
     ]),
     el("p", { class: "small dim", style: { marginBottom: "0" } }, [
       "Supervisors: backup and reset live in the panel under Settings."

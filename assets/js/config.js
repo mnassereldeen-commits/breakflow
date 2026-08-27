@@ -1,12 +1,10 @@
 /* ============================================================
    BreakFlow — shipped defaults
 
-   There is nothing to configure to get started. The app stores
-   everything in the browser it runs in, so put it on one shared
-   break-board PC, create the accounts, and go.
-
-   These values are only used the first time the app runs on a
-   machine. After that everything is editable in the Admin panel.
+   The team's data lives in the Firebase project below, synced to
+   every PC that opens the site. These DEFAULTS are only used the
+   first time ever the database is empty. After that everything is
+   editable in the Admin panel.
 
    `minutes`        : length of the break. Hard capped at 60 (one hour).
    `maxConcurrent`  : how many people may be on THIS break at once.
@@ -15,6 +13,22 @@
                       seconds of no clicking, so the next agent gets a
                       clean login screen. 0 turns it off.
    ============================================================ */
+
+/* ------------------------------------------------------------------
+   Firebase project config, from Project settings -> General -> "Your
+   apps" -> the </> web app. This is NOT a secret - it just tells the
+   browser which project to talk to. Access is controlled by the
+   Realtime Database security rules (see README), not by hiding this.
+   ------------------------------------------------------------------ */
+export const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCJF_VCtF-xDDbaG0XCIInZAOaV5jdF-PY",
+  authDomain: "petra-breaks.firebaseapp.com",
+  databaseURL: "https://petra-breaks-default-rtdb.firebaseio.com",
+  projectId: "petra-breaks",
+  storageBucket: "petra-breaks.firebasestorage.app",
+  messagingSenderId: "457293358179",
+  appId: "1:457293358179:web:394211df9d67ea16860456"
+};
 
 /* ------------------------------------------------------------------
    The owner's admin account, created automatically the first time the
@@ -36,8 +50,8 @@ export const SEED_ADMIN = {
   name: "Murad Nassereldeen",
   username: "murad",
   team: "",
-  salt: "2888423dac0f67ee00256c90af8b3873",
-  hash: "19c2c4ac2c788c5de985ddf306bba0736fa2e223a3221ff910e40ea1e8ebf671"
+  salt: "94bd93b9f6aef24a48d6733d7d306d65",
+  hash: "a1130cdabc99326aa113499563b7307b0dc0c6c8f59f01bf53e0c3b02c189723"
 };
 
 export const DEFAULTS = {

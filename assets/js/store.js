@@ -1,21 +1,23 @@
 /* ============================================================
    BreakFlow - accounts, data and the queue engine
 
-   Everything lives in this browser's localStorage. No server, no
-   third-party service, nothing to set up: put the site on one shared
-   break-board PC, create the accounts, and the team uses that machine.
+   The shared data (accounts, break policies, live sessions) lives in
+   Firebase Realtime Database and is synced to every PC that opens the
+   site - that's what makes one live board possible across separate
+   machines. Only two things stay local to this browser: which account
+   is signed in here, and the idle clock for auto sign-out. Take
+   backups (Admin -> Settings -> Backup) in case the database is ever
+   wiped or misconfigured.
 
-   Consequences, stated plainly:
-     * Data does not leave this browser. Another computer sees an
-       empty app. Take backups (Admin -> Settings -> Backup).
-     * Login stops people acting as each other by accident or mischief.
-       It is not real security: anyone with developer tools on this PC
-       can read or edit the stored data directly.
+   Login stops people acting as each other by accident or mischief. It
+   is not real security: anyone with developer tools and the Firebase
+   config (which is public, by design - see config.js) can read or
+   write the database directly.
    ============================================================ */
 
 import { DEFAULTS, SEED_ADMIN } from "./config.js";
+import { connectFirebase, watchRoot, writePatch } from "./firebase.js";
 
-const LS_DATA = "breakflow.db";
 const LS_SESSION = "breakflow.session";
 const LS_ACTIVE = "breakflow.lastActive";
 
@@ -149,7 +151,7 @@ class Store {
   constructor() {
     this.state = withDefaults(null);
     this.user = null;              // signed-in account record
-    this.access = "unknown";       // unknown | setup | signed-out | ok
+    this.access = "unknown";       // unknown | no-storage | no-connection | setup | signed-out | ok
     this._changes = bus();
     this._status = bus();
     this._errors = bus();
@@ -172,7 +174,7 @@ class Store {
     console.warn("BreakFlow:", what, err);
   }
 
-  /** Every write goes through here, so blocked storage is survivable. */
+  /** Local-only writes (session + idle clock), so blocked storage is survivable. */
   _write(key, value) {
     try {
       localStorage.setItem(key, value);
@@ -184,6 +186,11 @@ class Store {
     }
   }
 
+  /** Push a sparse patch to the shared database. Fire-and-forget; errors surface as toasts. */
+  _writeRemote(patch) {
+    return writePatch(patch).catch((e) => this._fail(e, "save to the shared board"));
+  }
+
   /* ---------------- load / save ---------------- */
   async connect() {
     this.storageOk = storageWorks();
@@ -192,22 +199,44 @@ class Store {
       this._pushStatus();
       return "no-storage";
     }
-    this._load();
-    /* another tab changed things - pick it up */
+
+    try {
+      await connectFirebase();
+    } catch (e) {
+      this.access = "no-connection";
+      this._fail(e, "connect to the shared board");
+      this._pushStatus();
+      return "no-connection";
+    }
+
+    /* another tab on this PC changed who's signed in here */
     addEventListener("storage", (e) => {
-      if (e.key === LS_DATA) { this._load(true); this._emit(); this._pushStatus(); }
       if (e.key === LS_SESSION) { this._resume(); this._pushStatus(); this._emit(); }
     });
-    this._resume();
-    this._pushStatus();
-    this._emit();
-    return "local";
+
+    return new Promise((resolve) => {
+      let settled = false;
+      watchRoot(
+        (raw) => {
+          this._applySnapshot(raw);
+          if (!settled) { settled = true; resolve("cloud"); }
+        },
+        (e) => {
+          if (settled) return;
+          settled = true;
+          this.access = "no-connection";
+          this._fail(e, "read the shared board");
+          this._pushStatus();
+          resolve("no-connection");
+        }
+      );
+    });
   }
 
-  _load(keepSession) {
-    let raw = null;
-    try { raw = JSON.parse(localStorage.getItem(LS_DATA) || "null"); } catch (e) { /* ignore */ }
+  /** Runs on the first snapshot and on every change from any PC on the team. */
+  _applySnapshot(raw) {
     if (!raw) {
+      /* the database is empty - this is the very first run for the whole team */
       raw = {
         settings: {
           teamName: DEFAULTS.teamName,
@@ -220,11 +249,13 @@ class Store {
         agents: seededAdmin(),
         sessions: {}
       };
-      this._write(LS_DATA, JSON.stringify(raw));
+      this._writeRemote(raw);
     }
     this.state = withDefaults(raw);
     this._repair();
-    if (!keepSession && !Object.keys(this.state.agents).length) this.access = "setup";
+    this._resume();
+    this._pushStatus();
+    this._emit();
   }
 
   /**
@@ -242,7 +273,7 @@ class Store {
       changed = true;
     }
     if (changed) {
-      this._write(LS_DATA, JSON.stringify(this.state));
+      this._writeRemote({ agents: this.state.agents, breakTypes: this.state.breakTypes });
     }
     return changed;
   }
@@ -271,8 +302,9 @@ class Store {
     return true;
   }
 
+  /** Account changes push the whole (small) roster + break types, not the fast-moving sessions. */
   _save() {
-    this._write(LS_DATA, JSON.stringify(this.state));
+    this._writeRemote({ agents: this.state.agents, breakTypes: this.state.breakTypes });
     this._emit();
   }
 
@@ -435,7 +467,12 @@ class Store {
   }
 
   /* ---------------- writes ---------------- */
-  /** patch: { "a/b/c": value }  - null deletes. */
+  /**
+   * patch: { "a/b/c": value } - null deletes. Applied to local state right
+   * away (so the UI never waits on a round trip) and pushed to the shared
+   * database as the same sparse patch, so it can never race a session
+   * another PC is writing the way a full-tree overwrite would.
+   */
   update(patch) {
     for (const [k, v] of Object.entries(patch)) {
       const parts = k.split("/").filter(Boolean);
@@ -451,7 +488,8 @@ class Store {
         node[leaf] = Object.assign(node[leaf] || {}, v);
       } else node[leaf] = v;
     }
-    this._save();
+    this._writeRemote(patch);
+    this._emit();
   }
 
   /* ---------------- backup ---------------- */
@@ -463,8 +501,8 @@ class Store {
     }, null, 2);
   }
 
-  /** Replace everything with a backup file. Signs out afterwards. */
-  importJSON(text) {
+  /** Replace everything on the shared board with a backup file. Signs out afterwards. */
+  async importJSON(text) {
     let parsed;
     try { parsed = JSON.parse(text); } catch (e) { throw new Error("That file isn't valid JSON."); }
     const data = parsed && parsed.data ? parsed.data : parsed;
@@ -472,12 +510,19 @@ class Store {
       throw new Error("That doesn't look like a BreakFlow backup.");
     }
     this.state = withDefaults(data);
-    this._save();
+    await this._writeRemote({
+      settings: this.state.settings,
+      breakTypes: this.state.breakTypes,
+      agents: this.state.agents,
+      sessions: this.state.sessions
+    });
+    this._emit();
     this.signOut();
   }
 
-  wipeEverything() {
-    localStorage.removeItem(LS_DATA);
+  /** Erases the shared board for the whole team, not just this PC. */
+  async wipeEverything() {
+    await this._writeRemote({ settings: null, breakTypes: null, agents: null, sessions: null });
     localStorage.removeItem(LS_SESSION);
     localStorage.removeItem(LS_ACTIVE);
   }
