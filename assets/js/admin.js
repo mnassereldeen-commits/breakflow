@@ -587,11 +587,19 @@ function newAccount(role) {
   const team = input({ placeholder: "Team / shift (optional)" });
   const pass = input({ type: "text", value: suggestPassword() });
 
-  /* suggest a username from the name, until they type their own */
+  /* Suggest a username from the FIRST name - "Sara Khalil" should
+     become "sara", not "sarakhalil" - and step around clashes.
+     Stops as soon as they type their own. */
   let touched = false;
   user.addEventListener("input", () => { touched = true; });
   name.addEventListener("input", () => {
-    if (!touched) user.value = normUsername(name.value).slice(0, 20);
+    if (touched) return;
+    const first = normUsername(String(name.value).trim().split(/\s+/)[0] || "").slice(0, 20);
+    if (!first) { user.value = ""; return; }
+    let candidate = first;
+    let n = 1;
+    while (store.findByUsername(candidate)) { n++; candidate = first + n; }
+    user.value = candidate;
   });
 
   modal(role === ROLES.ADMIN ? "Add an admin" : "Add an agent", el("div", { class: "stack" }, [

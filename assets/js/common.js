@@ -67,9 +67,31 @@ export function toast(msg, kind) {
 }
 
 /* ---------- modal --------------------------------------------------- */
+/* Tracked so the kiosk timer can tell "idle" from "filling in a form",
+   and so a sign-out can never leave a dialog stranded on top of the
+   login screen looking like it still works. */
+const openModals = new Set();
+
+/* Read the DOM rather than trust the set: a dialog removed by other
+   means would otherwise leave a phantom entry behind and disable the
+   kiosk timer for good. */
+export function anyModalOpen() {
+  return !!document.querySelector(".modal-wrap:not(.out)");
+}
+export function closeAllModals() {
+  for (const c of Array.from(openModals)) c();
+  openModals.clear();
+  document.querySelectorAll(".modal-wrap").forEach((n) => n.remove());
+}
+
 export function modal(title, bodyNode, actions) {
   const wrap = el("div", { class: "modal-wrap" });
-  const close = () => { wrap.classList.add("out"); setTimeout(() => wrap.remove(), 200); };
+  const close = () => {
+    openModals.delete(close);
+    wrap.classList.add("out");
+    setTimeout(() => wrap.remove(), 200);
+  };
+  openModals.add(close);
   const foot = el("div", { class: "modal-foot" });
   for (const a of actions || []) {
     foot.append(el("button", {
@@ -405,9 +427,24 @@ export function mountKioskTimer() {
     addEventListener(ev, bump, { passive: true });
   }
   store.touch();
+
+  /* Whenever the signed-in user goes away, take any open dialog with
+     them and say so - a silent swap to the login screen behind a form
+     that still looks live is how work gets lost. */
+  let had = !!store.user;
+  store.onStatus(({ user }) => {
+    if (had && !user) {
+      closeAllModals();
+      toast("Signed out — the screen was left idle. Sign in again to carry on.", "error");
+    }
+    had = !!user;
+  });
+
   setInterval(() => {
     const secs = Number(store.state.settings.kioskTimeoutSec || 0);
     if (!secs || !store.user) return;
+    /* someone mid-form is working, not idle */
+    if (anyModalOpen()) { store.touch(); return; }
     if (Date.now() - store.lastActive() > secs * 1000) store.signOut();
   }, 5000);
 }
@@ -443,42 +480,26 @@ export function mountErrorToasts() {
   });
 }
 
-/** Last resort when a browser's stored data has you locked out. */
+/**
+ * Help for someone who can't get in. Deliberately has NO destructive
+ * action and lists no usernames: this dialog is reachable by anyone
+ * standing at the PC, signed in or not.
+ */
 export function troubleDialog() {
-  const accounts = sortedAgents(store.state);
-  const list = accounts.length
-    ? el("div", { class: "stack", style: { gap: "6px" } }, accounts.map((a) =>
-      el("div", { class: "row", style: { gap: "8px" } }, [
-        el("span", { class: "badge " + (a.role === ROLES.ADMIN ? "cy" : ""), text: a.role === ROLES.ADMIN ? "admin" : "agent" }),
-        el("b", { class: "mono", text: a.username }),
-        el("span", { class: "small dim", text: a.name })
-      ])))
-    : el("p", { class: "empty", text: "No accounts exist in this browser yet." });
-
+  const n = sortedAgents(store.state).length;
   modal("Trouble signing in?", el("div", { class: "stack" }, [
     el("p", { class: "muted small" }, [
-      "Accounts live in this browser, on this computer. These are the ones it knows about:"
-    ]),
-    list,
-    el("p", { class: "muted small" }, [
-      "If your account isn't listed, you're on a different computer or browser profile from the one it was created on — accounts don't travel between machines."
+      "Forgotten your password? Ask your supervisor — they can set you a new one from the Accounts tab in a few seconds."
     ]),
     el("p", { class: "muted small" }, [
-      "Forgotten your password? A supervisor can set you a new one from the Accounts tab."
+      "Typed it right and it still won't go? Check the capitals: usernames ignore them, passwords don't."
     ]),
-    el("div", { class: "callout" }, [
-      "Starting over erases every account, break and report stored in this browser. Only do it if this PC has nothing you need — download a backup first if it does."
+    el("p", { class: "muted small" }, [
+      "Accounts live in this browser, on this computer, and don't travel between machines — so make sure you're on the same PC your account was created on. This one has ",
+      el("b", { text: n === 1 ? "1 account" : n + " accounts" }), " set up."
+    ]),
+    el("p", { class: "small dim", style: { marginBottom: "0" } }, [
+      "Supervisors: backup and reset live in the panel under Settings."
     ])
-  ]), [
-    { label: "Close", kind: "ghost" },
-    {
-      label: "Erase and start over", kind: "danger", onClick: async () => {
-        if (!(await confirmBox("Erase everything in this browser?",
-          "All accounts, breaks and history stored here are deleted. There is no undo.",
-          "Erase everything"))) return false;
-        store.wipeEverything();
-        location.reload();
-      }
-    }
-  ]);
+  ]), [{ label: "Close", kind: "primary" }]);
 }
