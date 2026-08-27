@@ -23,16 +23,19 @@ import { connectFirebase, watchRoot, writePatch } from "./firebase.js";
 const LS_SESSION = "breakflow.session";
 
 export const STATES = {
-  QUEUED: "queued", ACTIVE: "active", OVER: "over",
+  QUEUED: "queued", READY: "ready", ACTIVE: "active", OVER: "over",
   DONE: "done", CANCELLED: "cancelled", DENIED: "denied"
 };
 const CLOSED = [STATES.DONE, STATES.CANCELLED, STATES.DENIED];
-const OPEN = [STATES.QUEUED, STATES.ACTIVE, STATES.OVER];
+const OPEN = [STATES.QUEUED, STATES.READY, STATES.ACTIVE, STATES.OVER];
 
 export const ROLES = { AGENT: "agent", ADMIN: "admin" };
 
 /** Hard ceiling on any single break, in minutes. */
 export const MAX_BREAK_MINUTES = 60;
+
+/** How long a slot waits for "are you ready?" before starting the break anyway. */
+export const READY_WINDOW_MS = 5 * 60000;
 
 export function clampMinutes(v, fallback) {
   const n = Number(v);
@@ -538,11 +541,14 @@ export function occupiesSlot(s, g, now) {
   if (!s) return false;
   if (CLOSED.indexOf(s.state) >= 0) return false;
   if (s.state === STATES.QUEUED) return false;
+  /* holds the slot for the whole "are you ready?" window, before endsAt even exists */
+  if (s.state === STATES.READY) return true;
   return now < (s.endsAt || 0) + g;
 }
 
 export function isOver(s, now) {
-  return !!s && OPEN.indexOf(s.state) >= 0 && s.state !== STATES.QUEUED && now > (s.endsAt || 0);
+  if (!s || (s.state !== STATES.ACTIVE && s.state !== STATES.OVER)) return false;
+  return now > (s.endsAt || 0);
 }
 
 export function occupancy(state, now) {
@@ -567,9 +573,16 @@ export function queueFor(state, typeId) {
 export function onBreakNow(state, now) {
   const g = graceMs(state);
   return listSessions(state)
-    .filter((s) => s.state !== STATES.QUEUED && CLOSED.indexOf(s.state) < 0)
+    .filter((s) => s.state === STATES.ACTIVE || s.state === STATES.OVER)
     .filter((s) => now < (s.endsAt || 0) + g + 3600000)
     .sort((a, b) => (a.endsAt || 0) - (b.endsAt || 0));
+}
+
+/** Sessions holding a slot, waiting on the agent to confirm they're taking it. */
+export function awaitingConfirm(state) {
+  return listSessions(state)
+    .filter((s) => s.state === STATES.READY)
+    .sort((a, b) => (a.readyAt || 0) - (b.readyAt || 0));
 }
 
 export function sortedTypes(state) {
@@ -603,7 +616,7 @@ export function queuePosition(state, session) {
    Queue engine
    ================================================================== */
 
-/** Which queued breaks should start now, and which have run out. */
+/** Which queued breaks should be offered a slot, which unanswered offers time out, and what's run out. */
 export function plan(state, now) {
   const g = graceMs(state);
   const globalMax = Number(state.settings.globalMaxConcurrent === undefined ? 3 : state.settings.globalMaxConcurrent);
@@ -618,7 +631,7 @@ export function plan(state, now) {
     }
   }
 
-  const start = [];
+  const offer = [];
   for (const s of queueFor(state)) {
     const bt = types[s.breakTypeId];
     if (!bt) continue;
@@ -626,29 +639,51 @@ export function plan(state, now) {
     if (total >= globalMax) break;
     const cap = Number(bt.maxConcurrent === undefined ? 1 : bt.maxConcurrent);
     if ((perType[bt.id] || 0) >= cap) continue;
-    start.push(s);
+    offer.push(s);
     perType[bt.id] = (perType[bt.id] || 0) + 1;
     total++;
   }
 
   const expire = listSessions(state).filter((s) => s.state === STATES.ACTIVE && s.endsAt && s.endsAt <= now);
-  return { start, expire };
+  const autoStart = listSessions(state).filter((s) => s.state === STATES.READY && s.readyDeadline && s.readyDeadline <= now);
+  return { offer, expire, autoStart };
 }
 
 export function reconcile() {
   const now = store.now();
   const p = plan(store.state, now);
-  if (!p.start.length && !p.expire.length) return;
+  if (!p.offer.length && !p.expire.length && !p.autoStart.length) return;
   const patch = {};
   for (const s of p.expire) patch["sessions/" + s.id + "/state"] = STATES.OVER;
-  for (const s of p.start) {
+  for (const s of p.offer) {
+    patch["sessions/" + s.id + "/state"] = STATES.READY;
+    patch["sessions/" + s.id + "/readyAt"] = now;
+    patch["sessions/" + s.id + "/readyDeadline"] = now + READY_WINDOW_MS;
+  }
+  for (const s of p.autoStart) {
     const bt = (store.state.breakTypes || {})[s.breakTypeId] || {};
     const mins = clampMinutes(s.minutes || bt.minutes, 10);
     patch["sessions/" + s.id + "/state"] = STATES.ACTIVE;
     patch["sessions/" + s.id + "/startedAt"] = now;
     patch["sessions/" + s.id + "/endsAt"] = now + mins * 60000;
+    patch["sessions/" + s.id + "/autoStarted"] = true;
   }
   store.update(patch);
+}
+
+/** Agent taps "I'm ready" - starts the break right now instead of waiting out the window. */
+export function confirmReady(sessionId, by) {
+  const now = store.now();
+  const s = (store.state.sessions || {})[sessionId];
+  if (!s || s.state !== STATES.READY) return;
+  const bt = (store.state.breakTypes || {})[s.breakTypeId] || {};
+  const mins = clampMinutes(s.minutes || bt.minutes, 10);
+  store.update({
+    ["sessions/" + sessionId + "/state"]: STATES.ACTIVE,
+    ["sessions/" + sessionId + "/startedAt"]: now,
+    ["sessions/" + sessionId + "/endsAt"]: now + mins * 60000,
+    ["sessions/" + sessionId + "/confirmedBy"]: by || s.agentName
+  });
 }
 
 /* ---------- actions ------------------------------------------------- */

@@ -145,6 +145,12 @@ session independently, so signing out on one PC doesn't touch anyone else's.
 3. Queued requests are promoted **oldest request first**, as long as the break type has a free
    slot *and* the floor-wide cap isn't reached. Types marked *requires approval* wait for an
    admin instead.
+4. Promotion doesn't start the break outright — it offers the slot. The agent gets an
+   **"are you ready?"** prompt with a 5-minute countdown (`READY_WINDOW_MS` in
+   [`assets/js/store.js`](assets/js/store.js)) to confirm, and the slot is held for them the
+   whole time. Confirming (or an admin's **Start now** from **Awaiting confirmation** on the
+   Live board) starts the break immediately; letting the countdown run out starts it anyway,
+   flagged `autoStarted`.
 
 Two independent limits decide who goes: **per break type** ("2 on Short Break at once") and
 **whole floor** ("never more than 3 away, whatever they're on"). The stricter one wins.
