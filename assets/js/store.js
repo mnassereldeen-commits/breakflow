@@ -188,7 +188,52 @@ class Store {
       localStorage.setItem(LS_DATA, JSON.stringify(raw));
     }
     this.state = withDefaults(raw);
+    this._repair();
     if (!keepSession && !Object.keys(this.state.agents).length) this.access = "setup";
+  }
+
+  /**
+   * Bring a database that already exists up to a usable state.
+   *
+   * Both of these used to happen only when the database was created
+   * from scratch, which left any browser that had already visited
+   * stranded: it kept its old contents and never got the owner account
+   * or the break types.
+   */
+  _repair() {
+    let changed = this._ensureSeededAdmin();
+    if (!Object.keys(this.state.breakTypes || {}).length) {
+      this.state.breakTypes = JSON.parse(JSON.stringify(DEFAULTS.breakTypes));
+      changed = true;
+    }
+    if (changed) {
+      try { localStorage.setItem(LS_DATA, JSON.stringify(this.state)); } catch (e) { /* ignore */ }
+    }
+    return changed;
+  }
+
+  /**
+   * Make sure there is always a way in.
+   *
+   * Whenever there is no admin at all, put the seeded owner back. A
+   * working board always has at least one admin, so this never touches
+   * a real setup or undoes a changed password.
+   */
+  _ensureSeededAdmin() {
+    const s = SEED_ADMIN;
+    if (!s || !s.username || !s.salt || !s.hash) return false;
+    if (admins(this.state).length) return false;
+
+    const uname = normUsername(s.username);
+    const existing = sortedAgents(this.state).find((a) => normUsername(a.username) === uname);
+    if (existing) {
+      /* promote rather than duplicate the username - and leave their
+         own password alone, since it is not ours to overwrite */
+      existing.role = ROLES.ADMIN;
+    } else {
+      Object.assign(this.state.agents, seededAdmin());
+    }
+    return true;
   }
 
   _save() {

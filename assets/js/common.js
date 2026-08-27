@@ -2,7 +2,7 @@
    BreakFlow - shared UI helpers
    ============================================================ */
 
-import { store, ROLES, normUsername } from "./store.js";
+import { store, ROLES, normUsername, sortedAgents } from "./store.js";
 import { SEED_ADMIN } from "./config.js";
 /* ---------- DOM ----------------------------------------------------- */
 export const $ = (sel, root) => (root || document).querySelector(sel);
@@ -339,10 +339,16 @@ export function signInGate(teamName, mode) {
     ]),
     seg,
     el("div", { class: "stack", style: { gap: "10px", marginTop: "16px" } }, [user, pass, btn, msg]),
-    el("p", { class: "small dim center", style: { marginTop: "14px", marginBottom: "0" } }, [
+    el("p", { class: "small dim center", style: { marginTop: "14px", marginBottom: "6px" } }, [
       isAdminSide
         ? "Only accounts with the admin role can open this panel."
         : "Your supervisor gives you your username and password."
+    ]),
+    el("p", { class: "small center", style: { margin: "0" } }, [
+      el("a", {
+        href: "#", text: "Trouble signing in?",
+        onclick: (e) => { e.preventDefault(); troubleDialog(); }
+      })
     ])
   ]);
   setTimeout(() => user.focus(), 80);
@@ -435,4 +441,44 @@ export function mountErrorToasts() {
   store.onError(({ what, error }) => {
     toast("Couldn't " + (what || "save") + ": " + ((error && error.message) || "unknown error"), "error");
   });
+}
+
+/** Last resort when a browser's stored data has you locked out. */
+export function troubleDialog() {
+  const accounts = sortedAgents(store.state);
+  const list = accounts.length
+    ? el("div", { class: "stack", style: { gap: "6px" } }, accounts.map((a) =>
+      el("div", { class: "row", style: { gap: "8px" } }, [
+        el("span", { class: "badge " + (a.role === ROLES.ADMIN ? "cy" : ""), text: a.role === ROLES.ADMIN ? "admin" : "agent" }),
+        el("b", { class: "mono", text: a.username }),
+        el("span", { class: "small dim", text: a.name })
+      ])))
+    : el("p", { class: "empty", text: "No accounts exist in this browser yet." });
+
+  modal("Trouble signing in?", el("div", { class: "stack" }, [
+    el("p", { class: "muted small" }, [
+      "Accounts live in this browser, on this computer. These are the ones it knows about:"
+    ]),
+    list,
+    el("p", { class: "muted small" }, [
+      "If your account isn't listed, you're on a different computer or browser profile from the one it was created on — accounts don't travel between machines."
+    ]),
+    el("p", { class: "muted small" }, [
+      "Forgotten your password? A supervisor can set you a new one from the Accounts tab."
+    ]),
+    el("div", { class: "callout" }, [
+      "Starting over erases every account, break and report stored in this browser. Only do it if this PC has nothing you need — download a backup first if it does."
+    ])
+  ]), [
+    { label: "Close", kind: "ghost" },
+    {
+      label: "Erase and start over", kind: "danger", onClick: async () => {
+        if (!(await confirmBox("Erase everything in this browser?",
+          "All accounts, breaks and history stored here are deleted. There is no undo.",
+          "Erase everything"))) return false;
+        store.wipeEverything();
+        location.reload();
+      }
+    }
+  ]);
 }
