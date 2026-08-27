@@ -11,7 +11,7 @@
 import {
   store, STATES, ROLES, MAX_BREAK_MINUTES, clampMinutes, reconcile,
   sortedTypes, sortedAgents, admins, occupancy, queueFor, listSessions,
-  onBreakNow, endBreak, denyQueued, approveQueued, forceStart, adjustTime,
+  onBreakNow, awaitingConfirm, endBreak, denyQueued, approveQueued, forceStart, adjustTime,
   startForAgent, dayKey, isOver, normUsername
 } from "./store.js";
 
@@ -190,6 +190,7 @@ function liveTab(state, now) {
   const occ = occupancy(state, now);
   const globalMax = Number(state.settings.globalMaxConcurrent || 3);
   const live = onBreakNow(state, now);
+  const ready = awaitingConfirm(state);
   const q = queueFor(state);
   const overs = live.filter((s) => isOver(s, now));
   const today = dayKey(now);
@@ -237,6 +238,13 @@ function liveTab(state, now) {
       "⚠ " + overs.map((s) => s.agentName).join(", ") + " " + (overs.length === 1 ? "is" : "are") + " past their break time."
     ]) : null,
     concurrencyCard(state, now),
+    ready.length ? el("div", { class: "card" }, [
+      el("div", { class: "card-head" }, [
+        el("h2", { text: "Awaiting confirmation" }),
+        el("span", { class: "tiny", text: ready.length + " waiting on a reply" })
+      ]),
+      readyList(state, now, ready)
+    ]) : null,
     el("div", { class: "card" }, [
       el("div", { class: "card-head" }, [
         el("h2", { text: "On break now" }),
@@ -252,6 +260,29 @@ function liveTab(state, now) {
       queueList(state, now, q)
     ])
   ]);
+}
+
+function readyList(state, now, ready) {
+  const box = el("div", { class: "qline" });
+  for (const s of ready) {
+    const bt = state.breakTypes[s.breakTypeId] || {};
+    const left = Math.max(0, (s.readyDeadline || now) - now);
+    box.append(el("div", { class: "person-row" }, [
+      el("span", { class: "av", style: { "--h": hueFrom(s.agentName) }, text: initials(s.agentName) }),
+      el("div", { class: "who" }, [
+        el("b", { text: s.agentName }),
+        el("span", { text: (bt.icon || "") + " " + s.breakTypeName + " · a slot just opened for them" })
+      ]),
+      el("span", { class: "badge warn" }, [
+        el("span", { "data-cd": s.readyDeadline || 0, text: mmss(left) }),
+        " to confirm"
+      ]),
+      el("div", { class: "btn-row" }, [
+        el("button", { class: "btn sm ok", text: "Start now", title: "Confirm on their behalf", onclick: () => forceStart(s.id, actor()) })
+      ])
+    ]));
+  }
+  return box;
 }
 
 function queueList(state, now, q) {
@@ -312,7 +343,7 @@ function manualStart(state) {
       label: "Start break", kind: "primary", onClick: () => {
         const a = state.agents[aSel.value];
         const t = state.breakTypes[tSel.value];
-        const open = listSessions(state).some((s) => s.agentId === a.uid && [STATES.QUEUED, STATES.ACTIVE, STATES.OVER].includes(s.state));
+        const open = listSessions(state).some((s) => s.agentId === a.uid && [STATES.QUEUED, STATES.READY, STATES.ACTIVE, STATES.OVER].includes(s.state));
         if (open) { toast(a.name + " already has an open break.", "error"); return false; }
         startForAgent(a, t, actor());
         toast(a.name + " is on " + t.name, "ok");
@@ -500,7 +531,7 @@ function accountsTab(state, now) {
 
   for (const a of agents) {
     const mine = listSessions(state).filter((s) => s.agentId === a.uid && s.day === today);
-    const openS = mine.find((s) => [STATES.QUEUED, STATES.ACTIVE, STATES.OVER].includes(s.state));
+    const openS = mine.find((s) => [STATES.QUEUED, STATES.READY, STATES.ACTIVE, STATES.OVER].includes(s.state));
     const used = mine.filter((s) => s.startedAt).reduce((t, s) => t + Math.max(0, (s.endedAt || now) - s.startedAt), 0);
     const isSelf = a.uid === store.uid();
     const lastAdmin = a.role === ROLES.ADMIN && admin.length <= 1;
@@ -531,8 +562,13 @@ function accountsTab(state, now) {
       ]),
       el("td", {}, [
         openS
-          ? el("span", { class: "badge " + (openS.state === STATES.QUEUED ? "cy" : isOver(openS, now) ? "bad" : "ok") },
-            [openS.state === STATES.QUEUED ? "in queue" : isOver(openS, now) ? "over time" : "on break"])
+          ? el("span", {
+            class: "badge " + (openS.state === STATES.QUEUED ? "cy" : openS.state === STATES.READY ? "warn" : isOver(openS, now) ? "bad" : "ok")
+          }, [
+            openS.state === STATES.QUEUED ? "in queue"
+              : openS.state === STATES.READY ? "confirming"
+              : isOver(openS, now) ? "over time" : "on break"
+          ])
           : el("span", { class: "badge", text: "available" })
       ]),
       el("td", { class: "num", text: String(mine.filter((s) => s.startedAt).length) }),

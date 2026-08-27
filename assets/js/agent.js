@@ -5,7 +5,7 @@
 import {
   store, STATES, ROLES, reconcile, sortedTypes, sortedAgents,
   occupancy, queueFor, listSessions, mySession, queuePosition, estimateStart,
-  requestBreak, endBreak, cancelQueued, dayKey, isOver, onBreakNow
+  requestBreak, endBreak, cancelQueued, confirmReady, dayKey, isOver, onBreakNow
 } from "./store.js";
 
 import {
@@ -129,7 +129,7 @@ function ask(bt, willQueue, waiting) {
       willQueue
         ? "All " + bt.name + " slots are taken right now. You'll join the queue" +
           (waiting ? " behind " + waiting + " " + (waiting === 1 ? "person" : "people") : " at the front") +
-          " and start automatically the moment a slot opens."
+          ". The moment a slot opens you'll get 5 minutes to confirm you're taking it, or it starts on its own."
         : "You'll go on " + bt.name + " straight away for " + bt.minutes + " minutes."
     ]),
     el("p", { class: "muted small", text: "Your timer starts when the break starts, not when you request it." })
@@ -180,6 +180,46 @@ function myBreakCard(state, s, now) {
           }
         }
       }, ["Leave the queue"])
+    ]);
+  }
+
+  if (s.state === STATES.READY) {
+    const remain = Math.max(0, (s.readyDeadline || now) - now);
+    const warn = remain <= 60000;
+
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 244 244");
+    svg.setAttribute("width", "244");
+    svg.setAttribute("height", "244");
+    svg.innerHTML =
+      '<circle class="track" cx="122" cy="122" r="' + RING_R + '" fill="none" stroke-width="13"/>' +
+      '<circle class="prog" cx="122" cy="122" r="' + RING_R + '" fill="none" stroke-width="13" ' +
+      'stroke="' + color + '" stroke-dasharray="' + CIRC + '" stroke-dashoffset="0"/>';
+
+    const ring = el("div", {
+      class: "ring" + (warn ? " warn" : ""),
+      "data-ring": s.id, "data-endsat": s.readyDeadline || 0, "data-startedat": s.readyAt || 0
+    }, [
+      svg,
+      el("div", { class: "inner" }, [
+        el("div", { class: "time", "data-cd": s.readyDeadline || 0, text: mmss(remain) }),
+        el("div", { class: "lbl", text: "remaining" })
+      ])
+    ]);
+
+    return el("div", { class: "card pad-lg ring-card", style: { "--glow": "rgba(52,211,153,.22)" } }, [
+      el("span", { class: "badge ok", text: "It's your turn!" }),
+      ring,
+      el("div", { class: "big-name", text: (bt.icon || "") + " " + s.breakTypeName }),
+      el("div", { class: "back-at", text: "Confirm you're taking it, or it starts on its own when the timer runs out." }),
+      el("div", { style: { height: "10px" } }),
+      el("button", {
+        class: "btn lg primary", onclick: () => {
+          confirmReady(s.id, me().name);
+          beep("up");
+          toast("Break started — enjoy!", "ok");
+        }
+      }, ["✓  I'm ready — start my break"])
     ]);
   }
 
@@ -382,6 +422,22 @@ function watchMine(now) {
 
   if (s.state === STATES.QUEUED) {
     setBaseTitle("#" + queuePosition(store.state, s) + " in queue · BreakFlow");
+    return;
+  }
+
+  if (s.state === STATES.READY) {
+    const left = Math.max(0, (s.readyDeadline || now) - now);
+    if (!f.readyNotified) {
+      f.readyNotified = true;
+      beep("up");
+      notify("It's your turn!", "Confirm your " + s.breakTypeName + " or it starts on its own in 5 minutes.");
+    }
+    if (!f.readyWarned && left > 0 && left <= 60000) {
+      f.readyWarned = true;
+      beep("warn");
+      notify("1 minute to confirm", "Tap start, or your " + s.breakTypeName + " begins automatically.");
+    }
+    setBaseTitle("Ready? " + mmss(left) + " · " + s.breakTypeName);
     return;
   }
   const remain = (s.endsAt || now) - now;
