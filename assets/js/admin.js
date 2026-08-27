@@ -18,7 +18,7 @@ import {
   $, el, mmss, hhmm, human, toast, modal, confirmBox, field, input, select,
   mountStatusPill, mountClock, setFavicon, initials, hueFrom,
   csv, download, beep, notify, askNotify, mountErrorToasts, mountKioskTimer,
-  signInGate, setupGate, identityChip, storageDialog, changePasswordDialog
+  signInGate, setupGate, noStorageGate, identityChip, storageDialog, changePasswordDialog
 } from "./common.js";
 
 let tab = location.hash.replace("#", "") || "live";
@@ -57,6 +57,7 @@ function render() {
   main.innerHTML = "";
   identityChip($("#idHost"));
 
+  if (store.access === "no-storage") { main.append(noStorageGate()); return; }
   if (store.access === "setup") { main.append(setupGate()); return; }
   if (store.access !== "ok" || !store.user) { main.append(signInGate(state.settings.teamName, "admin")); return; }
   if (!isAdmin()) { main.append(notAdmin()); return; }

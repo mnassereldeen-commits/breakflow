@@ -77,6 +77,23 @@ export function normUsername(u) {
   return String(u || "").trim().toLowerCase().replace(/\s+/g, "");
 }
 
+/* ------------------------------------------------------------------
+   Can this browser store anything at all? Private Browsing and
+   "block cookies and site data" both let reads through but reject
+   writes, which used to crash the app on a first visit and show a
+   blank page - a common way for a phone to look simply broken.
+   ------------------------------------------------------------------ */
+function storageWorks() {
+  try {
+    const k = "__breakflow_probe__";
+    localStorage.setItem(k, "1");
+    localStorage.removeItem(k);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 /* ---------- event bus ----------------------------------------------- */
 function bus() {
   const subs = new Set();
@@ -155,8 +172,26 @@ class Store {
     console.warn("BreakFlow:", what, err);
   }
 
+  /** Every write goes through here, so blocked storage is survivable. */
+  _write(key, value) {
+    try {
+      localStorage.setItem(key, value);
+      return true;
+    } catch (e) {
+      this.storageOk = false;
+      this._fail(e, "save to this browser");
+      return false;
+    }
+  }
+
   /* ---------------- load / save ---------------- */
   async connect() {
+    this.storageOk = storageWorks();
+    if (!this.storageOk) {
+      this.access = "no-storage";
+      this._pushStatus();
+      return "no-storage";
+    }
     this._load();
     /* another tab changed things - pick it up */
     addEventListener("storage", (e) => {
@@ -185,7 +220,7 @@ class Store {
         agents: seededAdmin(),
         sessions: {}
       };
-      localStorage.setItem(LS_DATA, JSON.stringify(raw));
+      this._write(LS_DATA, JSON.stringify(raw));
     }
     this.state = withDefaults(raw);
     this._repair();
@@ -207,7 +242,7 @@ class Store {
       changed = true;
     }
     if (changed) {
-      try { localStorage.setItem(LS_DATA, JSON.stringify(this.state)); } catch (e) { /* ignore */ }
+      this._write(LS_DATA, JSON.stringify(this.state));
     }
     return changed;
   }
@@ -237,8 +272,7 @@ class Store {
   }
 
   _save() {
-    try { localStorage.setItem(LS_DATA, JSON.stringify(this.state)); }
-    catch (e) { this._fail(e, "save to this browser"); throw e; }
+    this._write(LS_DATA, JSON.stringify(this.state));
     this._emit();
   }
 
@@ -268,7 +302,7 @@ class Store {
     if (!rec) throw new Error("No account with that username.");
     const ok = await verifyPassword(password, rec.salt, rec.hash);
     if (!ok) throw new Error("Wrong password.");
-    localStorage.setItem(LS_SESSION, rec.uid);
+    this._write(LS_SESSION, rec.uid);
     this.touch();
     this.user = rec;
     this.access = "ok";
@@ -285,7 +319,7 @@ class Store {
     this._emit();
   }
 
-  touch() { try { localStorage.setItem(LS_ACTIVE, String(Date.now())); } catch (e) { /* ignore */ } }
+  touch() { this._write(LS_ACTIVE, String(Date.now())); }
   lastActive() { return Number(localStorage.getItem(LS_ACTIVE) || 0); }
 
   newId() {

@@ -371,10 +371,45 @@ export function signInGate(teamName, mode) {
         href: "#", text: "Trouble signing in?",
         onclick: (e) => { e.preventDefault(); troubleDialog(); }
       })
-    ])
+    ]),
+    /* A device that only has the shipped owner account has never been
+       set up. Say so, rather than letting an agent hit "no account with
+       that username" and assume the site is broken. */
+    sortedAgents(store.state).length <= 1
+      ? el("div", { class: "callout", style: { marginTop: "16px" } }, [
+        el("b", { text: "This device has its own separate board." }),
+        el("div", { class: "small", style: { marginTop: "4px" } }, [
+          "No agent accounts have been created here yet. BreakFlow stores everything in the browser it runs in, so accounts made on another computer don't exist on this one — sign in on the PC your supervisor set up."
+        ])
+      ])
+      : null
   ]);
   setTimeout(() => user.focus(), 80);
   return el("div", { class: "gate" }, [card]);
+}
+
+/** This browser refuses to store anything, so nothing can work. */
+export function noStorageGate() {
+  return el("div", { class: "gate" }, [
+    el("div", { class: "card pad-lg", style: { maxWidth: "460px" } }, [
+      el("div", { class: "center" }, [
+        el("div", { class: "mark big", text: "B" }),
+        el("h2", { text: "This browser won't let BreakFlow save" })
+      ]),
+      el("p", { class: "muted small", style: { marginTop: "12px" } }, [
+        "BreakFlow keeps everything in the browser's own storage, and this one is blocking it. Nothing can be signed into or recorded until that changes."
+      ]),
+      el("p", { class: "muted small" }, ["Usually one of:"]),
+      el("ul", { class: "small muted", style: { margin: "0 0 12px", paddingLeft: "20px" } }, [
+        el("li", {}, ["you're in ", el("b", { text: "Private Browsing" }), " or an incognito window — open the site in a normal window"]),
+        el("li", {}, ["the browser is set to ", el("b", { text: "block cookies and site data" }), " — allow it for this site"]),
+        el("li", {}, ["storage is full — clear some space"])
+      ]),
+      el("div", { class: "btn-row", style: { justifyContent: "center" } }, [
+        el("button", { class: "btn primary", text: "Try again", onclick: () => location.reload() })
+      ])
+    ])
+  ]);
 }
 
 /* ---------- first run ----------------------------------------------- */
