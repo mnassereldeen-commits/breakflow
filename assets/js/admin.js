@@ -18,7 +18,7 @@ import {
   $, el, mmss, hhmm, human, toast, modal, confirmBox, field, input, select,
   mountStatusPill, mountClock, setFavicon, initials, hueFrom,
   csv, download, beep, notify, askNotify, mountErrorToasts, mountKioskTimer,
-  signInGate, setupGate, identityChip, storageDialog
+  signInGate, setupGate, identityChip, storageDialog, changePasswordDialog
 } from "./common.js";
 
 let tab = location.hash.replace("#", "") || "live";
@@ -78,6 +78,7 @@ function render() {
     }));
   }
   main.append(nav);
+  if (store.usingSeededPassword()) main.append(seededPasswordBanner());
 
   const body = el("div", { class: "stack" });
   const now = store.now();
@@ -89,6 +90,16 @@ function render() {
   else body.append(settingsTab(state));
   main.append(body);
   tickClocks(now);
+}
+
+function seededPasswordBanner() {
+  return el("div", { class: "callout", style: { marginBottom: "16px" } }, [
+    el("div", { class: "row wrap" }, [
+      el("span", {}, ["⚠ You're still on the starter password that ships with the site. Anyone who reads the code could work it out — set your own."]),
+      el("div", { class: "spacer" }),
+      el("button", { class: "btn sm primary", text: "Change my password", onclick: () => changePasswordDialog() })
+    ])
+  ]);
 }
 
 function notAdmin() {

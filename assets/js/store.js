@@ -13,7 +13,7 @@
        can read or edit the stored data directly.
    ============================================================ */
 
-import { DEFAULTS } from "./config.js";
+import { DEFAULTS, SEED_ADMIN } from "./config.js";
 
 const LS_DATA = "breakflow.db";
 const LS_SESSION = "breakflow.session";
@@ -83,6 +83,30 @@ function bus() {
   return {
     on: (f) => { subs.add(f); return () => subs.delete(f); },
     emit: (v) => subs.forEach((f) => { try { f(v); } catch (e) { console.error(e); } })
+  };
+}
+
+/**
+ * The owner's account, ready to sign into on a fresh machine.
+ * Returns {} if config.js has no SEED_ADMIN, which falls back to the
+ * "create the first admin" setup screen.
+ */
+function seededAdmin() {
+  const s = SEED_ADMIN;
+  if (!s || !s.username || !s.salt || !s.hash) return {};
+  const uid = "owner";
+  return {
+    [uid]: {
+      uid: uid,
+      username: String(s.username).trim().toLowerCase(),
+      name: s.name || s.username,
+      team: s.team || "",
+      role: ROLES.ADMIN,
+      salt: s.salt,
+      hash: s.hash,
+      seeded: true,
+      createdAt: Date.now()
+    }
   };
 }
 
@@ -158,7 +182,7 @@ class Store {
           createdAt: Date.now()
         },
         breakTypes: DEFAULTS.breakTypes,
-        agents: {},
+        agents: seededAdmin(),
         sessions: {}
       };
       localStorage.setItem(LS_DATA, JSON.stringify(raw));
@@ -251,13 +275,24 @@ class Store {
     return this.state.agents[uid];
   }
 
-  /** Admin sets someone's password, or you change your own. */
+  /**
+   * Admin sets someone's password, or you change your own.
+   *
+   * If a currentPassword is supplied it is ALWAYS checked, admin or
+   * not - otherwise the "change your password" dialog would ask for it
+   * and then ignore it for admins. Admins resetting somebody else (the
+   * Accounts tab) pass nothing and skip the check, which is also how an
+   * admin who forgot their own password gets back in.
+   */
   async setPassword(uid, password, currentPassword) {
     const rec = this.state.agents[uid];
     if (!rec) throw new Error("No such account.");
     const isSelf = this.user && this.user.uid === uid;
     if (!this.isAdmin() && !isSelf) throw new Error("Not allowed.");
-    if (isSelf && !this.isAdmin()) {
+
+    const gaveCurrent = currentPassword !== undefined && currentPassword !== null;
+    if (isSelf && !this.isAdmin() && !gaveCurrent) throw new Error("Enter your current password.");
+    if (gaveCurrent) {
       const ok = await verifyPassword(currentPassword, rec.salt, rec.hash);
       if (!ok) throw new Error("Your current password is wrong.");
     }
@@ -266,7 +301,14 @@ class Store {
     rec.salt = salt;
     rec.hash = hash;
     rec.passwordChangedAt = Date.now();
+    delete rec.seeded;          /* no longer the one shipped in config.js */
     this._save();
+    if (this.user && this.user.uid === uid) { this.user = rec; this._pushStatus(); }
+  }
+
+  /** True while this account still uses the password published in config.js. */
+  usingSeededPassword() {
+    return !!(this.user && this.user.seeded);
   }
 
   async updateAccount(uid, patch) {

@@ -67,22 +67,31 @@ Every approval, denial, override and forced close is recorded under the admin's 
 
 ## Setup
 
-1. Open the site on the break-board PC:
-   <https://mnassereldeen-commits.github.io/breakflow/>
-2. It asks you to **create your own admin account**. The name and username are pre-filled
-   (`Murad` / `murad`) — just choose a password. The first account is always an admin, so you
-   can't lock yourself out.
+The owner's admin account already exists — username **`murad`** — so there is no setup
+screen. On the break-board PC:
 
-   The password is deliberately *not* in this repo: the repo is public, so anything committed
-   here is readable by anyone. Change the pre-filled name in
-   [`assets/js/config.js`](assets/js/config.js) (`SEED_ADMIN`) if you want a different owner —
-   but never put a real password in that file.
-3. **Accounts → ＋ Add agent** for each person. A password is suggested; you're shown the
+1. Open the **supervisor link** and sign in as `murad`.
+2. **Change the password straight away.** A banner at the top of the panel nags you until you
+   do, because the starter password ships with the site and anyone reading the code could
+   work it out.
+3. **Accounts → ＋ Add agent** for each person. A password is suggested; you're shown their
    username and password once with a **Copy both** button. Hand them over.
-4. Tune **Break policies** and the **floor cap**, and you're running.
-5. **Bookmark the page on that PC** and take a backup from Settings.
+4. Tune **Break policies** and the **floor cap** if the defaults don't fit.
+5. **Bookmark both links on that PC** and take a backup from Settings.
 
 Nothing else. No Firebase, no Google, no API keys.
+
+### How the seeded account works
+
+[`assets/js/config.js`](assets/js/config.js) holds `SEED_ADMIN`: a name, a username, and a
+random salt plus a PBKDF2-SHA256 digest (120,000 rounds) of the starter password. **The
+password itself is not in the repo** and can't be read back out of the digest — but treat the
+digest as public, since the repo is. Changing the password replaces both values in that
+browser and clears the warning banner.
+
+To seed a different owner: sign in, create the account you want on the Accounts tab, download
+a backup, and copy that account's `salt` and `hash` into `SEED_ADMIN`. Set it to `null` to get
+a "create the first admin" setup screen instead.
 
 ### Auto sign-out (on by default, 120 seconds)
 
