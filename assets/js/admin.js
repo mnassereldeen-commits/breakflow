@@ -18,7 +18,7 @@ import {
 import {
   $, el, mmss, hhmm, human, toast, modal, confirmBox, field, input, select,
   mountStatusPill, mountClock, setFavicon, initials, hueFrom,
-  csv, download, beep, notify, askNotify, mountErrorToasts, mountKioskTimer,
+  csv, download, beep, notify, askNotify, mountErrorToasts,
   signInGate, setupGate, noStorageGate, noConnectionGate, identityChip, storageDialog, changePasswordDialog
 } from "./common.js";
 
@@ -40,7 +40,6 @@ mountErrorToasts();
 store.connect().then(() => {
   store.onStatus(render);
   store.onChange(render);
-  mountKioskTimer();
   setInterval(loop, 1000);
   loop();
 });
@@ -806,7 +805,6 @@ function settingsTab(state) {
   const team = input({ value: state.settings.teamName || "" });
   const cap = input({ type: "number", min: "1", max: "50", value: state.settings.globalMaxConcurrent });
   const grace = input({ type: "number", min: "0", max: "60", value: state.settings.graceMinutes });
-  const kiosk = input({ type: "number", min: "0", max: "3600", value: state.settings.kioskTimeoutSec });
 
   return el("div", { class: "stack" }, [
     el("div", { class: "card" }, [
@@ -814,19 +812,15 @@ function settingsTab(state) {
       el("div", { class: "inline-fields" }, [
         field("Team name", team),
         field("Max people away at once", cap, "hard ceiling across all break types"),
-        field("Overtime grace (minutes)", grace, "how long an overstay keeps blocking its slot"),
-        field("Auto sign-out (seconds)", kiosk, "0 = stay signed in")
+        field("Overtime grace (minutes)", grace, "how long an overstay keeps blocking its slot")
       ]),
-      el("p", { class: "small dim", style: { marginTop: "10px" } },
-        ["Auto sign-out returns this PC to the login screen after that long without a click, so the next agent gets a clean slate. Running breaks keep their timers — the agent signs back in to tap “I'm back”."]),
       el("div", { style: { height: "10px" } }),
       el("button", {
         class: "btn primary", text: "Save policy", onclick: () => {
           store.update({
             "settings/teamName": team.value.trim() || "Team",
             "settings/globalMaxConcurrent": Math.max(1, Math.min(50, Number(cap.value) || 1)),
-            "settings/graceMinutes": Math.max(0, Number(grace.value) || 0),
-            "settings/kioskTimeoutSec": Math.max(0, Math.min(3600, Number(kiosk.value) || 0))
+            "settings/graceMinutes": Math.max(0, Number(grace.value) || 0)
           });
           reconcile();
           toast("Policy saved", "ok");

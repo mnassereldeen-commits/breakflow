@@ -4,8 +4,10 @@
    The shared data (accounts, break policies, live sessions) lives in
    Firebase Realtime Database and is synced to every PC that opens the
    site - that's what makes one live board possible across separate
-   machines. Only two things stay local to this browser: which account
-   is signed in here, and the idle clock for auto sign-out. Take
+   machines. Only one thing stays local: which account is signed in on
+   this tab, kept in sessionStorage rather than localStorage so it
+   clears itself when the browser closes - no idle timer, no "kiosk"
+   behaviour, just sign in and sign out like any other site. Take
    backups (Admin -> Settings -> Backup) in case the database is ever
    wiped or misconfigured.
 
@@ -19,7 +21,6 @@ import { DEFAULTS, SEED_ADMIN } from "./config.js";
 import { connectFirebase, watchRoot, writePatch } from "./firebase.js";
 
 const LS_SESSION = "breakflow.session";
-const LS_ACTIVE = "breakflow.lastActive";
 
 export const STATES = {
   QUEUED: "queued", ACTIVE: "active", OVER: "over",
@@ -88,8 +89,8 @@ export function normUsername(u) {
 function storageWorks() {
   try {
     const k = "__breakflow_probe__";
-    localStorage.setItem(k, "1");
-    localStorage.removeItem(k);
+    sessionStorage.setItem(k, "1");
+    sessionStorage.removeItem(k);
     return true;
   } catch (e) {
     return false;
@@ -135,8 +136,7 @@ function withDefaults(s) {
     settings: Object.assign({
       teamName: DEFAULTS.teamName,
       globalMaxConcurrent: DEFAULTS.globalMaxConcurrent,
-      graceMinutes: DEFAULTS.graceMinutes,
-      kioskTimeoutSec: DEFAULTS.kioskTimeoutSec
+      graceMinutes: DEFAULTS.graceMinutes
     }, st.settings || {}),
     breakTypes: st.breakTypes || {},
     agents: st.agents || {},
@@ -174,14 +174,14 @@ class Store {
     console.warn("BreakFlow:", what, err);
   }
 
-  /** Local-only writes (session + idle clock), so blocked storage is survivable. */
+  /** Local-only write (which account is signed in on this tab), so blocked storage is survivable. */
   _write(key, value) {
     try {
-      localStorage.setItem(key, value);
+      sessionStorage.setItem(key, value);
       return true;
     } catch (e) {
       this.storageOk = false;
-      this._fail(e, "save to this browser");
+      this._fail(e, "remember your sign-in in this tab");
       return false;
     }
   }
@@ -208,11 +208,6 @@ class Store {
       this._pushStatus();
       return "no-connection";
     }
-
-    /* another tab on this PC changed who's signed in here */
-    addEventListener("storage", (e) => {
-      if (e.key === LS_SESSION) { this._resume(); this._pushStatus(); this._emit(); }
-    });
 
     return new Promise((resolve) => {
       let settled = false;
@@ -242,7 +237,6 @@ class Store {
           teamName: DEFAULTS.teamName,
           globalMaxConcurrent: DEFAULTS.globalMaxConcurrent,
           graceMinutes: DEFAULTS.graceMinutes,
-          kioskTimeoutSec: DEFAULTS.kioskTimeoutSec,
           createdAt: Date.now()
         },
         breakTypes: DEFAULTS.breakTypes,
@@ -308,9 +302,9 @@ class Store {
     this._emit();
   }
 
-  /** Restore the signed-in account from the last session, if any. */
+  /** Restore the signed-in account from this tab's session, if any. */
   _resume() {
-    const uid = localStorage.getItem(LS_SESSION);
+    const uid = sessionStorage.getItem(LS_SESSION);
     if (!Object.keys(this.state.agents).length) { this.user = null; this.access = "setup"; return; }
     if (uid && this.state.agents[uid]) {
       this.user = this.state.agents[uid];
@@ -335,7 +329,6 @@ class Store {
     const ok = await verifyPassword(password, rec.salt, rec.hash);
     if (!ok) throw new Error("Wrong password.");
     this._write(LS_SESSION, rec.uid);
-    this.touch();
     this.user = rec;
     this.access = "ok";
     this._pushStatus();
@@ -343,16 +336,14 @@ class Store {
     return rec;
   }
 
+  /** Also clears on its own when the tab or browser closes, since the session lives in sessionStorage. */
   signOut() {
-    localStorage.removeItem(LS_SESSION);
+    sessionStorage.removeItem(LS_SESSION);
     this.user = null;
     this.access = this.needsSetup() ? "setup" : "signed-out";
     this._pushStatus();
     this._emit();
   }
-
-  touch() { this._write(LS_ACTIVE, String(Date.now())); }
-  lastActive() { return Number(localStorage.getItem(LS_ACTIVE) || 0); }
 
   newId() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -523,8 +514,7 @@ class Store {
   /** Erases the shared board for the whole team, not just this PC. */
   async wipeEverything() {
     await this._writeRemote({ settings: null, breakTypes: null, agents: null, sessions: null });
-    localStorage.removeItem(LS_SESSION);
-    localStorage.removeItem(LS_ACTIVE);
+    sessionStorage.removeItem(LS_SESSION);
   }
 }
 
