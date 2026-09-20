@@ -136,18 +136,21 @@ session independently, so signing out on one PC doesn't touch anyone else's.
 
 ## How the queue works
 
-`plan()` in [`assets/js/store.js`](assets/js/store.js) decides everything:
+`plan()` in [`assets/js/engine.js`](assets/js/engine.js) decides everything:
 
-1. A break holds its slot from the moment it starts until its end time plus the *grace
-   period* (default 3 minutes), measured purely from the clock.
-2. After the grace period the slot is released, so one forgetful person can't stall the whole
-   floor — the break stays open and flagged until they tap *I'm back* or an admin closes it.
+1. A break holds its slot from the moment it starts. By default (**Settings → Keep an
+   overstay's slot blocked = Yes**) it keeps holding it until the person taps *I'm back* or an
+   admin closes it, so nobody else is sent out while they are still away. As a safety net the
+   slot is freed an hour after it was due, so a closed laptop can't block the floor all shift.
+2. With that setting switched to **No**, the older behaviour applies instead: the slot is freed
+   once the *grace period* (default 3 minutes) after the end time has passed, and the break
+   stays open and flagged until they tap *I'm back* or an admin closes it.
 3. Queued requests are promoted **oldest request first**, as long as the break type has a free
    slot *and* the floor-wide cap isn't reached. Types marked *requires approval* wait for an
    admin instead.
 4. Promotion doesn't start the break outright — it offers the slot. The agent gets an
    **"are you ready?"** prompt with a 5-minute countdown (`READY_WINDOW_MS` in
-   [`assets/js/store.js`](assets/js/store.js)) to confirm, and the slot is held for them the
+   [`assets/js/engine.js`](assets/js/engine.js)) to confirm, and the slot is held for them the
    whole time. Confirming (or an admin's **Start now** from **Awaiting confirmation** on the
    Live board) starts the break immediately; letting the countdown run out starts it anyway,
    flagged `autoStarted`.
@@ -158,6 +161,30 @@ Two independent limits decide who goes: **per break type** ("2 on Short Break at
 No break can exceed **60 minutes** — enforced on the policy editor, on manual starts, on queue
 promotion, and on *+5m* extensions (a 58-minute break takes +2 and then refuses).
 
+### Why two screens can't both hand out the same slot
+
+Every open screen checks the queue every second. To stop two of them acting on out-of-date
+copies of the board, every change (offer a slot, start, end, cancel, extend...) is made inside a
+**database transaction**: it is re-decided against the latest data and only applies if the break
+is still in the state the screen expected. A break that was closed can't be reopened by a slow
+screen, and the caps can't be exceeded by two screens racing. Times come from the database
+server's clock rather than each PC's own, so a PC that is a few minutes off can't fire alerts
+early or release a slot late. Timers run in a worker so a tab in the background still alerts on
+time.
+
+## Tests
+
+No install needed, just Node 20 or newer:
+
+```
+node --test tests/engine.test.mjs
+node --import ./tests/register.mjs --test tests/store.test.mjs
+```
+
+`engine.test.mjs` includes a simulated 4-hour shift with 12 agents and 6 lagging screens,
+run against both the old blind-write approach and the transaction approach. `store.test.mjs`
+drives the real `store.js` against an in-memory stand-in for Firebase, so nothing touches the
+live database.
 ## Passwords, honestly
 
 Passwords are **not** stored. Each account keeps a random salt and a PBKDF2-SHA256 hash
@@ -205,13 +232,15 @@ For GitHub Pages: push to `main`, then **Settings → Pages → Deploy from a br
 | --- | --- |
 | `index.html` | Agent view |
 | `admin.html` | Supervisor panel |
-| `assets/js/store.js` | Accounts, passwords, the shared database and the queue engine |
+| `assets/js/engine.js` | The queue engine as plain functions (no browser, no Firebase) |
+| `assets/js/store.js` | Accounts, passwords, the shared database, and atomic session changes |
 | `assets/js/firebase.js` | Firebase connection (anonymous sign-in, database read/write) |
 | `assets/js/agent.js` | Agent UI |
 | `assets/js/admin.js` | Admin UI |
 | `assets/js/common.js` | Shared UI (sign-in, modals, toasts, sound, CSV…) |
 | `assets/js/config.js` | Firebase project config + shipped defaults for a fresh database |
 | `assets/css/app.css` | Design system |
+| `tests/` | Engine and store tests (see Tests) |
 
 ## Licence
 

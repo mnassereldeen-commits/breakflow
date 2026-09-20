@@ -186,6 +186,30 @@ export function stopFlash() {
 export function setBaseTitle(t) { baseTitle = t; if (!flashTimer) document.title = t; }
 
 
+/* ---------- a timer that keeps time in a background tab -------------
+   Browsers slow setInterval in a tab you can't see to about once a
+   minute, so "1 minute left" and "break's over" arrived late whenever
+   the agent was in another window - which is where they usually are.
+   A worker's timer isn't throttled that way. We also run one tick the
+   moment the tab becomes visible again, and if workers aren't allowed we
+   fall back to a plain interval.
+   ------------------------------------------------------------------ */
+export function startTicker(fn, ms) {
+  const every = ms || 1000;
+  let worker = null;
+  try {
+    const url = URL.createObjectURL(new Blob(["setInterval(function(){postMessage(0)}," + every + ")"], { type: "text/javascript" }));
+    worker = new Worker(url);
+    worker.onmessage = () => fn();
+    worker.onerror = () => { worker.terminate(); worker = null; setInterval(fn, every); };
+  } catch (e) {
+    worker = null;
+    setInterval(fn, every);
+  }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) fn(); });
+  window.addEventListener("focus", fn);
+}
+
 /* ---------- clock in the header ------------------------------------ */
 export function mountClock(node) {
   const tick = () => {

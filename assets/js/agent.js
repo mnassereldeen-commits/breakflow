@@ -10,7 +10,7 @@ import {
 
 import {
   $, el, mmss, hhmm, human, toast, modal, beep, askNotify, notify,
-  flashTitle, stopFlash, setBaseTitle, mountStatusPill, mountClock, setFavicon,
+  flashTitle, stopFlash, setBaseTitle, mountStatusPill, mountClock, setFavicon, startTicker,
   initials, hueFrom, confirmBox, mountErrorToasts,
   signInGate, setupGate, noStorageGate, noConnectionGate, identityChip
 } from "./common.js";
@@ -28,7 +28,7 @@ mountErrorToasts();
 store.connect().then(() => {
   store.onStatus(render);
   store.onChange(render);
-  setInterval(loop, 1000);
+  startTicker(loop, 1000);
   loop();
 });
 
