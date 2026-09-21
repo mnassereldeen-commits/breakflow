@@ -18,30 +18,19 @@
    ============================================================ */
 
 import { DEFAULTS, SEED_ADMIN } from "./config.js";
-import { connectFirebase, watchRoot, writePatch } from "./firebase.js";
+import { connectFirebase, watchRoot, writePatch, transactSessions, readServerOffset } from "./firebase.js";
+import {
+  STATES, OPEN, MAX_BREAK_MINUTES, READY_WINDOW_MS, HOLD_CAP_MS, clampMinutes,
+  listSessions, plan, planIsEmpty,
+  applyReconcile, applyRequest, applyConfirmReady, applyEnd, applyCancel, applyDeny,
+  applyApprove, applyForceStart, applyAdjust, applyStartFor
+} from "./engine.js";
+
+export { STATES, MAX_BREAK_MINUTES, READY_WINDOW_MS, HOLD_CAP_MS, clampMinutes };
 
 const LS_SESSION = "breakflow.session";
 
-export const STATES = {
-  QUEUED: "queued", READY: "ready", ACTIVE: "active", OVER: "over",
-  DONE: "done", CANCELLED: "cancelled", DENIED: "denied"
-};
-const CLOSED = [STATES.DONE, STATES.CANCELLED, STATES.DENIED];
-const OPEN = [STATES.QUEUED, STATES.READY, STATES.ACTIVE, STATES.OVER];
-
 export const ROLES = { AGENT: "agent", ADMIN: "admin" };
-
-/** Hard ceiling on any single break, in minutes. */
-export const MAX_BREAK_MINUTES = 60;
-
-/** How long a slot waits for "are you ready?" before starting the break anyway. */
-export const READY_WINDOW_MS = 5 * 60000;
-
-export function clampMinutes(v, fallback) {
-  const n = Number(v);
-  if (!isFinite(n) || n <= 0) return Math.min(MAX_BREAK_MINUTES, Number(fallback) || 1);
-  return Math.min(MAX_BREAK_MINUTES, Math.max(1, Math.round(n)));
-}
 
 /* ---------- passwords ----------------------------------------------
    PBKDF2-SHA256 via the built-in Web Crypto, so no libraries. Needs a
@@ -155,6 +144,7 @@ class Store {
     this.state = withDefaults(null);
     this.user = null;              // signed-in account record
     this.access = "unknown";       // unknown | no-storage | no-connection | setup | signed-out | ok
+    this.clockOffset = 0;          // server time minus this PC's clock, so every screen agrees on "now"
     this._changes = bus();
     this._status = bus();
     this._errors = bus();
@@ -165,7 +155,8 @@ class Store {
   onError(fn) { return this._errors.on(fn); }
 
   statusSnapshot() { return { access: this.access, user: this.user }; }
-  now() { return Date.now(); }
+  /** The database server's clock, not this PC's - PCs disagree by minutes more often than you'd think. */
+  now() { return Date.now() + this.clockOffset; }
   isAdmin() { return !!(this.user && this.user.role === ROLES.ADMIN); }
   uid() { return this.user ? this.user.uid : null; }
   get member() { return this.user; }
@@ -205,6 +196,7 @@ class Store {
 
     try {
       await connectFirebase();
+      this.clockOffset = await readServerOffset(3000);
     } catch (e) {
       this.access = "no-connection";
       this._fail(e, "connect to the shared board");
@@ -486,6 +478,24 @@ class Store {
     this._emit();
   }
 
+  /**
+   * Change the live sessions atomically. `fn(state, now)` edits
+   * `state.sessions` in place and returns true if it changed anything; it
+   * is re-run against the latest data if another PC got there first, so it
+   * must decide from `state` alone. Resolves { changed, aborted }.
+   */
+  mutate(fn) {
+    let changed = false;
+    return transactSessions((sessions) => {
+      const view = { settings: this.state.settings, breakTypes: this.state.breakTypes, sessions: sessions };
+      changed = !!fn(view, this.now());
+      return changed;
+    }).then(
+      (res) => ({ changed: changed && !!(res && res.committed), aborted: !(res && res.committed) }),
+      (e) => { this._fail(e, "save to the shared board"); return { changed: false, aborted: true, error: e }; }
+    );
+  }
+
   /* ---------------- backup ---------------- */
   exportJSON() {
     return JSON.stringify({
@@ -524,66 +534,13 @@ class Store {
 export const store = new Store();
 
 /* ==================================================================
-   Reads / derived state
+   Reads / derived state - plain functions, shared with the tests
    ================================================================== */
 
-export function listSessions(state) {
-  return Object.entries(state.sessions || {}).map(([id, s]) => Object.assign({ id }, s));
-}
-
-export function graceMs(state) {
-  const g = state.settings.graceMinutes;
-  return (g === undefined || g === null ? 3 : Number(g)) * 60000;
-}
-
-/** Time-based, so slot maths never depends on a status flag being written. */
-export function occupiesSlot(s, g, now) {
-  if (!s) return false;
-  if (CLOSED.indexOf(s.state) >= 0) return false;
-  if (s.state === STATES.QUEUED) return false;
-  /* holds the slot for the whole "are you ready?" window, before endsAt even exists */
-  if (s.state === STATES.READY) return true;
-  return now < (s.endsAt || 0) + g;
-}
-
-export function isOver(s, now) {
-  if (!s || (s.state !== STATES.ACTIVE && s.state !== STATES.OVER)) return false;
-  return now > (s.endsAt || 0);
-}
-
-export function occupancy(state, now) {
-  const g = graceMs(state);
-  const perType = {};
-  let total = 0;
-  for (const s of listSessions(state)) {
-    if (occupiesSlot(s, g, now)) {
-      perType[s.breakTypeId] = (perType[s.breakTypeId] || 0) + 1;
-      total++;
-    }
-  }
-  return { perType, total };
-}
-
-export function queueFor(state, typeId) {
-  return listSessions(state)
-    .filter((s) => s.state === STATES.QUEUED && (!typeId || s.breakTypeId === typeId))
-    .sort((a, b) => (a.requestedAt || 0) - (b.requestedAt || 0));
-}
-
-export function onBreakNow(state, now) {
-  const g = graceMs(state);
-  return listSessions(state)
-    .filter((s) => s.state === STATES.ACTIVE || s.state === STATES.OVER)
-    .filter((s) => now < (s.endsAt || 0) + g + 3600000)
-    .sort((a, b) => (a.endsAt || 0) - (b.endsAt || 0));
-}
-
-/** Sessions holding a slot, waiting on the agent to confirm they're taking it. */
-export function awaitingConfirm(state) {
-  return listSessions(state)
-    .filter((s) => s.state === STATES.READY)
-    .sort((a, b) => (a.readyAt || 0) - (b.readyAt || 0));
-}
+export {
+  listSessions, graceMs, holdsUntilBack, occupiesSlot, isOver, occupancy, queueFor,
+  onBreakNow, awaitingConfirm, mySession, queuePosition, estimateStart, plan, dayKey
+} from "./engine.js";
 
 export function sortedTypes(state) {
   return Object.values(state.breakTypes || {})
@@ -601,225 +558,81 @@ export function admins(state) {
 }
 export const supervisors = admins;
 
-export function mySession(state, uid) {
-  return listSessions(state)
-    .filter((s) => s.agentId === uid && OPEN.indexOf(s.state) >= 0)
-    .sort((a, b) => (b.requestedAt || 0) - (a.requestedAt || 0))[0] || null;
-}
-
-export function queuePosition(state, session) {
-  const q = queueFor(state, session.breakTypeId);
-  return q.findIndex((s) => s.id === session.id) + 1;
-}
-
 /* ==================================================================
-   Queue engine
+   Actions on sessions
+
+   Every one of these runs inside a database transaction (see
+   Store.mutate): it re-checks the session against the latest data and
+   only acts if it is still in the state the caller expected. Screens
+   used to write their own copy of "what should happen next" straight to
+   the database, which let two PCs hand out the same slot and let a
+   stale one reopen a break somebody had just closed.
    ================================================================== */
 
-/** Which queued breaks should be offered a slot, which unanswered offers time out, and what's run out. */
-export function plan(state, now) {
-  const g = graceMs(state);
-  const globalMax = Number(state.settings.globalMaxConcurrent === undefined ? 3 : state.settings.globalMaxConcurrent);
-  const types = state.breakTypes || {};
+let reconciling = false;
 
-  const perType = {};
-  let total = 0;
-  for (const s of listSessions(state)) {
-    if (occupiesSlot(s, g, now)) {
-      perType[s.breakTypeId] = (perType[s.breakTypeId] || 0) + 1;
-      total++;
-    }
-  }
-
-  const offer = [];
-  for (const s of queueFor(state)) {
-    const bt = types[s.breakTypeId];
-    if (!bt) continue;
-    if (bt.requiresApproval && !s.approvedBy) continue;
-    if (total >= globalMax) break;
-    const cap = Number(bt.maxConcurrent === undefined ? 1 : bt.maxConcurrent);
-    if ((perType[bt.id] || 0) >= cap) continue;
-    offer.push(s);
-    perType[bt.id] = (perType[bt.id] || 0) + 1;
-    total++;
-  }
-
-  const expire = listSessions(state).filter((s) => s.state === STATES.ACTIVE && s.endsAt && s.endsAt <= now);
-  const autoStart = listSessions(state).filter((s) => s.state === STATES.READY && s.readyDeadline && s.readyDeadline <= now);
-  return { offer, expire, autoStart };
-}
-
+/** Hand out free slots, start unanswered offers, mark what has run out. */
 export function reconcile() {
-  const now = store.now();
-  const p = plan(store.state, now);
-  if (!p.offer.length && !p.expire.length && !p.autoStart.length) return;
-  const patch = {};
-  for (const s of p.expire) patch["sessions/" + s.id + "/state"] = STATES.OVER;
-  for (const s of p.offer) {
-    patch["sessions/" + s.id + "/state"] = STATES.READY;
-    patch["sessions/" + s.id + "/readyAt"] = now;
-    patch["sessions/" + s.id + "/readyDeadline"] = now + READY_WINDOW_MS;
-  }
-  for (const s of p.autoStart) {
-    const bt = (store.state.breakTypes || {})[s.breakTypeId] || {};
-    const mins = clampMinutes(s.minutes || bt.minutes, 10);
-    patch["sessions/" + s.id + "/state"] = STATES.ACTIVE;
-    patch["sessions/" + s.id + "/startedAt"] = now;
-    patch["sessions/" + s.id + "/endsAt"] = now + mins * 60000;
-    patch["sessions/" + s.id + "/autoStarted"] = true;
-  }
-  store.update(patch);
+  if (reconciling || store.access === "no-connection") return;
+  /* cheap local look first, so an idle board costs no database round trips */
+  if (planIsEmpty(plan(store.state, store.now()))) return;
+  reconciling = true;
+  store.mutate((state, now) => applyReconcile(state, now))
+    .finally(() => { reconciling = false; });
 }
 
-/** Agent taps "I'm ready" - starts the break right now instead of waiting out the window. */
 export function confirmReady(sessionId, by) {
-  const now = store.now();
-  const s = (store.state.sessions || {})[sessionId];
-  if (!s || s.state !== STATES.READY) return;
-  const bt = (store.state.breakTypes || {})[s.breakTypeId] || {};
-  const mins = clampMinutes(s.minutes || bt.minutes, 10);
-  store.update({
-    ["sessions/" + sessionId + "/state"]: STATES.ACTIVE,
-    ["sessions/" + sessionId + "/startedAt"]: now,
-    ["sessions/" + sessionId + "/endsAt"]: now + mins * 60000,
-    ["sessions/" + sessionId + "/confirmedBy"]: by || s.agentName
-  });
+  store.mutate((state, now) => applyConfirmReady(state, sessionId, by, now));
 }
-
-/* ---------- actions ------------------------------------------------- */
 
 export function requestBreak(agent, bt) {
-  const now = store.now();
-  const open = listSessions(store.state).filter((s) => s.agentId === agent.uid && OPEN.indexOf(s.state) >= 0);
-  if (open.length) throw new Error("You already have a break open.");
+  const open = listSessions(store.state).some((s) => s.agentId === agent.uid && OPEN.indexOf(s.state) >= 0);
+  if (open) throw new Error("You already have a break open.");
   const id = store.newId();
-  store.update({
-    ["sessions/" + id]: {
-      agentId: agent.uid, agentName: agent.name, team: agent.team || "",
-      breakTypeId: bt.id, breakTypeName: bt.name, minutes: clampMinutes(bt.minutes, 10),
-      state: STATES.QUEUED, requestedAt: now, day: dayKey(now)
-    }
+  store.mutate((state, now) => applyRequest(state, id, agent, bt, now)).then((res) => {
+    if (res && res.aborted) store._fail(new Error("You already have a break open."), "request a break");
+    reconcile();
   });
-  reconcile();
   return id;
 }
 
 export function endBreak(sessionId, by) {
-  const now = store.now();
-  const s = (store.state.sessions || {})[sessionId];
-  if (!s) return;
-  store.update({
-    ["sessions/" + sessionId + "/state"]: STATES.DONE,
-    ["sessions/" + sessionId + "/endedAt"]: now,
-    ["sessions/" + sessionId + "/overBy"]: Math.max(0, now - (s.endsAt || now)),
-    ["sessions/" + sessionId + "/closedBy"]: by || "agent"
-  });
-  reconcile();
+  store.mutate((state, now) => applyEnd(state, sessionId, by, now)).then(reconcile);
 }
 
 export function cancelQueued(sessionId, by) {
-  store.update({
-    ["sessions/" + sessionId + "/state"]: STATES.CANCELLED,
-    ["sessions/" + sessionId + "/endedAt"]: store.now(),
-    ["sessions/" + sessionId + "/closedBy"]: by || "agent"
-  });
-  reconcile();
+  store.mutate((state, now) => applyCancel(state, sessionId, by, now)).then(reconcile);
 }
 
 export function denyQueued(sessionId, by, reason) {
-  store.update({
-    ["sessions/" + sessionId + "/state"]: STATES.DENIED,
-    ["sessions/" + sessionId + "/endedAt"]: store.now(),
-    ["sessions/" + sessionId + "/closedBy"]: by || "admin",
-    ["sessions/" + sessionId + "/reason"]: reason || ""
-  });
-  reconcile();
+  store.mutate((state, now) => applyDeny(state, sessionId, by, reason, now)).then(reconcile);
 }
 
 export function approveQueued(sessionId, by) {
-  store.update({ ["sessions/" + sessionId + "/approvedBy"]: by || "admin" });
-  reconcile();
+  store.mutate((state) => applyApprove(state, sessionId, by)).then(reconcile);
 }
 
 export function forceStart(sessionId, by) {
-  const now = store.now();
-  const s = (store.state.sessions || {})[sessionId];
-  if (!s) return;
-  const bt = (store.state.breakTypes || {})[s.breakTypeId] || {};
-  const mins = clampMinutes(s.minutes || bt.minutes, 10);
-  store.update({
-    ["sessions/" + sessionId + "/state"]: STATES.ACTIVE,
-    ["sessions/" + sessionId + "/startedAt"]: now,
-    ["sessions/" + sessionId + "/endsAt"]: now + mins * 60000,
-    ["sessions/" + sessionId + "/approvedBy"]: by || "admin",
-    ["sessions/" + sessionId + "/forced"]: true
-  });
+  store.mutate((state, now) => applyForceStart(state, sessionId, by, now));
 }
 
-/** Never stretches a break past MAX_BREAK_MINUTES of planned time. */
+/**
+ * Never stretches a break past MAX_BREAK_MINUTES of planned time.
+ * Returns straight away with what the change will be (worked out on the
+ * screen's copy); the real change is made against the latest data.
+ */
 export function adjustTime(sessionId, deltaMinutes) {
-  const s = (store.state.sessions || {})[sessionId];
-  if (!s) return { applied: 0, clamped: false };
-  const now = store.now();
-  const startedAt = s.startedAt || now;
-  const ceiling = startedAt + MAX_BREAK_MINUTES * 60000;
-  const base = Math.max(s.endsAt || now, now);
-  let endsAt = base + deltaMinutes * 60000;
-  let clamped = false;
-
-  if (deltaMinutes > 0 && endsAt > ceiling) { endsAt = ceiling; clamped = true; }
-  if (deltaMinutes > 0 && endsAt <= base) return { applied: 0, clamped: true };
-
-  const patch = {
-    ["sessions/" + sessionId + "/endsAt"]: endsAt,
-    ["sessions/" + sessionId + "/minutes"]: Math.max(1, Math.round((endsAt - startedAt) / 60000)),
-    ["sessions/" + sessionId + "/adjusted"]: (s.adjusted || 0) + Math.round((endsAt - base) / 60000)
-  };
-  if (endsAt > now && s.state === STATES.OVER) patch["sessions/" + sessionId + "/state"] = STATES.ACTIVE;
-  store.update(patch);
-  reconcile();
-  return { applied: Math.round((endsAt - base) / 60000), clamped: clamped };
+  const preview = { applied: 0, clamped: false };
+  const copy = JSON.parse(JSON.stringify({
+    settings: store.state.settings, breakTypes: store.state.breakTypes, sessions: store.state.sessions
+  }));
+  applyAdjust(copy, sessionId, deltaMinutes, store.now(), preview);
+  store.mutate((state, now) => applyAdjust(state, sessionId, deltaMinutes, now)).then(reconcile);
+  return preview;
 }
 
 export function startForAgent(agent, bt, by) {
-  const now = store.now();
   const id = store.newId();
-  const mins = clampMinutes(bt.minutes, 10);
-  store.update({
-    ["sessions/" + id]: {
-      agentId: agent.uid, agentName: agent.name, team: agent.team || "",
-      breakTypeId: bt.id, breakTypeName: bt.name, minutes: mins,
-      state: STATES.ACTIVE, requestedAt: now, startedAt: now,
-      endsAt: now + mins * 60000, day: dayKey(now),
-      approvedBy: by || "admin", forced: true
-    }
-  });
+  store.mutate((state, now) => applyStartFor(state, id, agent, bt, by, now));
   return id;
-}
-
-/* ---------- helpers ------------------------------------------------- */
-export function dayKey(ts) {
-  const d = new Date(ts);
-  return d.getFullYear() + "-" +
-    String(d.getMonth() + 1).padStart(2, "0") + "-" +
-    String(d.getDate()).padStart(2, "0");
-}
-
-/** Rough "you're up at ~" estimate for a queued break. */
-export function estimateStart(state, session, now) {
-  const bt = (state.breakTypes || {})[session.breakTypeId];
-  if (!bt) return null;
-  const g = graceMs(state);
-  const pos = queuePosition(state, session);
-  const cap = Number(bt.maxConcurrent === undefined ? 1 : bt.maxConcurrent);
-  const busy = listSessions(state)
-    .filter((s) => s.breakTypeId === bt.id && occupiesSlot(s, g, now))
-    .map((s) => s.endsAt || now)
-    .sort((a, b) => a - b);
-  const free = Math.max(0, cap - busy.length);
-  if (pos <= free) return now;
-  const need = pos - free;
-  const idx = Math.max(0, Math.min(busy.length - 1, need - 1));
-  const rounds = Math.floor(Math.max(0, need - 1) / Math.max(1, cap));
-  return (busy[idx] || now) + rounds * clampMinutes(bt.minutes, 10) * 60000;
 }

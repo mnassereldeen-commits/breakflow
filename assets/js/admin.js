@@ -17,7 +17,7 @@ import {
 
 import {
   $, el, mmss, hhmm, human, toast, modal, confirmBox, field, input, select,
-  mountStatusPill, mountClock, setFavicon, initials, hueFrom,
+  mountStatusPill, mountClock, setFavicon, initials, hueFrom, startTicker,
   csv, download, beep, notify, askNotify, mountErrorToasts,
   signInGate, setupGate, noStorageGate, noConnectionGate, identityChip, storageDialog, changePasswordDialog
 } from "./common.js";
@@ -40,7 +40,7 @@ mountErrorToasts();
 store.connect().then(() => {
   store.onStatus(render);
   store.onChange(render);
-  setInterval(loop, 1000);
+  startTicker(loop, 1000);
   loop();
 });
 
@@ -841,6 +841,10 @@ function settingsTab(state) {
   const team = input({ value: state.settings.teamName || "" });
   const cap = input({ type: "number", min: "1", max: "50", value: state.settings.globalMaxConcurrent });
   const grace = input({ type: "number", min: "0", max: "60", value: state.settings.graceMinutes });
+  const hold = select([
+    { value: "yes", label: "Yes - until they tap “I'm back” (up to 1 hour)" },
+    { value: "no", label: "No - free it after the grace period" }
+  ], state.settings.holdSlotUntilBack === false ? "no" : "yes");
 
   return el("div", { class: "stack" }, [
     el("div", { class: "card" }, [
@@ -848,7 +852,8 @@ function settingsTab(state) {
       el("div", { class: "inline-fields" }, [
         field("Team name", team),
         field("Max people away at once", cap, "hard ceiling across all break types"),
-        field("Overtime grace (minutes)", grace, "how long an overstay keeps blocking its slot")
+        field("Keep an overstay's slot blocked", hold, "stops the next person leaving while someone is still out"),
+        field("Overtime grace (minutes)", grace, "only used when the slot is NOT held until they return")
       ]),
       el("div", { style: { height: "10px" } }),
       el("button", {
@@ -856,7 +861,8 @@ function settingsTab(state) {
           store.update({
             "settings/teamName": team.value.trim() || "Team",
             "settings/globalMaxConcurrent": Math.max(1, Math.min(50, Number(cap.value) || 1)),
-            "settings/graceMinutes": Math.max(0, Number(grace.value) || 0)
+            "settings/graceMinutes": Math.max(0, Number(grace.value) || 0),
+            "settings/holdSlotUntilBack": hold.value !== "no"
           });
           reconcile();
           toast("Policy saved", "ok");
@@ -962,14 +968,23 @@ function tickClocks(now) {
   }
 }
 
+/* Overstays that already existed when this page opened are shown on the
+   Live board but not announced again: reloading the panel used to replay
+   an alert for every break anyone had ever left open. */
+let overstaysBaselined = false;
+
 function watchOverstays(now) {
   for (const s of listSessions(store.state)) {
     if (!isOver(s, now) || s.state === STATES.QUEUED) continue;
-    if (alerted[s.id]) continue;
-    alerted[s.id] = true;
+    /* keyed by due time too, so a break that was extended and then ran out again is announced again */
+    const key = s.id + ":" + s.endsAt;
+    if (alerted[key]) continue;
+    alerted[key] = true;
+    if (!overstaysBaselined) continue;
     beep("warn");
     notify("Overstay: " + s.agentName, s.breakTypeName + " ran out at " + hhmm(s.endsAt) + ".");
   }
+  overstaysBaselined = true;
 }
 
 window.BreakFlow = { store: store };
