@@ -5,10 +5,21 @@ local program that drives the real PhoneBar window on an agent's own PC
 the same way a person would click it — using Windows UI Automation, not
 screen coordinates (those break on a different screen size or scaling).
 BreakFlow's web page calls it over `localhost` the instant *that* agent's
-own break truly starts or ends, so Xcally's pause status follows along.
+own break truly starts, and again the moment they tap **I'm back**.
 
 It only ever reacts to that one call. It never decides anything on its
 own, and it never reaches outside this one PC.
+
+**Break is automatic; Ready never is.** BreakFlow sends `/break` the
+moment a session becomes genuinely active — a confirmed start, an
+auto-start, or an admin putting someone on break directly, it doesn't
+matter which; that's the safe direction to be eager about, since it
+only ever stops calls being routed to someone. It sends `/ready` from
+exactly one place: the agent's own **I'm back** tap. A break can close
+without the agent actually being back at their desk yet (an admin
+closing it remotely from the Live board, for one), and this bridge
+must never put someone back in the call queue on the strength of that
+alone — only the agent saying so.
 
 ## What it does
 
