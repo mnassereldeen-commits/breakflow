@@ -93,7 +93,8 @@ function xcallyBridgeBanner() {
 function downloadBridgeFiles() {
   const files = [
     ["xcally-bridge/XcallyBridge.ps1", "XcallyBridge.ps1"],
-    ["xcally-bridge/Install.ps1", "Install.ps1"]
+    ["xcally-bridge/Install.ps1", "Install.ps1"],
+    ["xcally-bridge/Setup.bat", "Setup.bat"]
   ];
   files.forEach(([path, name], i) => {
     setTimeout(() => {
@@ -116,11 +117,11 @@ function openBridgeSetup() {
       el("button", { class: "btn primary", text: "⬇  Download", onclick: () => downloadBridgeFiles() })
     ]),
     el("ol", { class: "small", style: { paddingLeft: "20px", lineHeight: "1.7", marginTop: "10px" } }, [
-      el("li", {}, ["Two files download - your browser may ask to allow it, since that's more than one at once. Choose ", el("b", { text: "Allow" }), "."]),
-      el("li", {}, ["Open your ", el("b", { text: "Downloads" }), " folder. Right-click ", el("b", { text: "Install.ps1" }), " → ", el("b", { text: "Run with PowerShell" }), "."]),
+      el("li", {}, ["Three files download together - your browser may ask to allow it, since that's more than one at once. Choose ", el("b", { text: "Allow" }), "."]),
+      el("li", {}, ["Open your ", el("b", { text: "Downloads" }), " folder and double-click ", el("b", { text: "Setup.bat" }), " - same as opening any other program."]),
       el("li", {}, ["A window flashes and closes - that's it done. Come back here and press ", el("b", { text: "Check now" }), " below."])
     ]),
-    el("p", { class: "muted small", text: "Nothing here can run that program for you - only you clicking “Run with PowerShell” can. That's a real security boundary, not this site being unhelpful." }),
+    el("p", { class: "muted small", text: "Nothing here can run that program for you - only double-clicking Setup.bat can. That's a real security boundary, not this site being unhelpful." }),
     el("p", { class: "small dim" }, [
       "Prefer to look at the files first, or set several PCs up at once? ",
       el("a", { href: "https://github.com/mnassereldeen-commits/breakflow/tree/main/xcally-bridge", target: "_blank", rel: "noopener", text: "open the folder on GitHub" }), "."
