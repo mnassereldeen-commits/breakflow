@@ -14,6 +14,7 @@ import {
   initials, hueFrom, confirmBox, mountErrorToasts,
   signInGate, setupGate, noStorageGate, noConnectionGate, identityChip
 } from "./common.js";
+import { syncXcallyBreak } from "./xcally-bridge.js";
 
 const RING_R = 110;
 const CIRC = 2 * Math.PI * RING_R;
@@ -417,15 +418,20 @@ function tickClocks(now) {
 function watchMine(now) {
   if (!me()) return;
   const s = mySession(store.state, store.uid());
-  if (!s) { stopFlash(); setBaseTitle("BreakFlow"); return; }
+  /* Xcally should only show Break once the agent has actually left the
+     floor - not while merely queued, and not during the "are you
+     ready?" window, since they're still at their desk for that. */
+  if (!s) { syncXcallyBreak(false); stopFlash(); setBaseTitle("BreakFlow"); return; }
   const f = seen[s.id] || (seen[s.id] = {});
 
   if (s.state === STATES.QUEUED) {
+    syncXcallyBreak(false);
     setBaseTitle("#" + queuePosition(store.state, s) + " in queue · BreakFlow");
     return;
   }
 
   if (s.state === STATES.READY) {
+    syncXcallyBreak(false);
     const left = Math.max(0, (s.readyDeadline || now) - now);
     if (!f.readyNotified) {
       f.readyNotified = true;
@@ -440,6 +446,9 @@ function watchMine(now) {
     setBaseTitle("Ready? " + mmss(left) + " · " + s.breakTypeName);
     return;
   }
+
+  /* only ACTIVE and OVER reach here - the agent is genuinely away */
+  syncXcallyBreak(true);
   const remain = (s.endsAt || now) - now;
 
   if (!f.started) {
