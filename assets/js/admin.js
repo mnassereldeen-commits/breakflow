@@ -327,22 +327,53 @@ function askReason(who) {
   });
 }
 
+/**
+ * Neither select defaults to a real agent or break type - "Choose..." is
+ * the only thing selected until the admin actually picks something.
+ *
+ * This used to default to the alphabetically-first agent and first break
+ * type, so a click on "Start break" before touching either dropdown - a
+ * double click, a fast confirm out of habit, hitting the button before
+ * the modal finished opening - put a break on whoever sorted first,
+ * unasked. Now that can't happen: there is no valid default to submit,
+ * the preview line names exactly who is about to be started, and the
+ * button itself refuses to act until both are real choices.
+ */
 function manualStart(state) {
   const agents = sortedAgents(state);
   const types = sortedTypes(state);
   if (!agents.length) { toast("Create an account first.", "error"); return; }
   if (!types.length) { toast("Create a break policy first.", "error"); return; }
-  const aSel = select(agents.map((a) => ({ value: a.uid, label: a.name })), agents[0].uid);
-  const tSel = select(types.map((t) => ({ value: t.id, label: t.name + " (" + t.minutes + "m)" })), types[0].id);
+
+  const CHOOSE = "";
+  const aSel = select(
+    [{ value: CHOOSE, label: "Choose an agent…" }].concat(agents.map((a) => ({ value: a.uid, label: a.name }))),
+    CHOOSE
+  );
+  const tSel = select(
+    [{ value: CHOOSE, label: "Choose a break…" }].concat(types.map((t) => ({ value: t.id, label: t.name + " (" + t.minutes + "m)" }))),
+    CHOOSE
+  );
+  const preview = el("p", { class: "muted small", text: "Pick who, and which break - nothing starts until both are set." });
+  const refresh = () => {
+    const a = state.agents[aSel.value];
+    const t = state.breakTypes[tSel.value];
+    preview.textContent = (a && t)
+      ? ("This starts " + a.name + "'s " + t.name + " right now, whether or not they asked for it. Ignores the queue and slot limits.")
+      : "Pick who, and which break - nothing starts until both are set.";
+  };
+  aSel.addEventListener("change", refresh);
+  tSel.addEventListener("change", refresh);
+
   modal("Put someone on break", el("div", { class: "stack" }, [
-    el("p", { class: "muted small", text: "Starts immediately and ignores the queue and slot limits." }),
-    field("Agent", aSel), field("Break", tSel)
+    field("Agent", aSel), field("Break", tSel), preview
   ]), [
     { label: "Cancel", kind: "ghost" },
     {
       label: "Start break", kind: "primary", onClick: () => {
         const a = state.agents[aSel.value];
         const t = state.breakTypes[tSel.value];
+        if (!a || !t) { toast("Choose an agent and a break first.", "error"); return false; }
         const open = listSessions(state).some((s) => s.agentId === a.uid && [STATES.QUEUED, STATES.READY, STATES.ACTIVE, STATES.OVER].includes(s.state));
         if (open) { toast(a.name + " already has an open break.", "error"); return false; }
         startForAgent(a, t, actor());
