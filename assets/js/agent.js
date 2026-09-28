@@ -26,6 +26,16 @@ const seen = {};
    notice the bridge isn't answering and walk the agent through the
    one-time setup themselves (see xcally-bridge/README.md). */
 const LS_BRIDGE_DISMISS = "breakflow.xcallyBridgeDismissUntil";
+/* A browser will not let a page force a real file download with no
+   click behind it - and actively blocks a page auto-triggering
+   several downloads at once, which is exactly what setting up the
+   bridge needs (three files). So "force it on refresh" becomes: force
+   the SETUP MODAL open instead, the very first time ever the bridge
+   is found missing on this PC, landing the agent straight on the
+   Download button. That one click is real and reliable; a click-less
+   auto-download would not be. Fires once, permanently, per browser -
+   never nags again after that, whatever they did with it. */
+const LS_BRIDGE_AUTO_PROMPTED = "breakflow.xcallyBridgeAutoPrompted";
 let bridgeStatus = "unknown"; // "unknown" | "connected" | "missing"
 let bridgeCheckInFlight = false;
 let lastBridgeCheck = 0;
@@ -46,6 +56,12 @@ function setBridgeDismiss(v) {
 function clearBridgeDismiss() {
   try { localStorage.removeItem(LS_BRIDGE_DISMISS); } catch (e) {}
 }
+function hasAutoPromptedBridge() {
+  try { return localStorage.getItem(LS_BRIDGE_AUTO_PROMPTED) === "1"; } catch (e) { return true; /* storage broken - don't force anything */ }
+}
+function markBridgeAutoPrompted() {
+  try { localStorage.setItem(LS_BRIDGE_AUTO_PROMPTED, "1"); } catch (e) {}
+}
 
 function maybeCheckBridge(now) {
   if (bridgeCheckInFlight) return;
@@ -59,6 +75,10 @@ function maybeCheckBridge(now) {
       bridgeStatus = next;
       if (ok) clearBridgeDismiss();
       render();
+    }
+    if (!ok && !hasAutoPromptedBridge()) {
+      markBridgeAutoPrompted();
+      openBridgeSetup();
     }
   });
 }
