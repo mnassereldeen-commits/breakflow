@@ -14,11 +14,110 @@ import {
   initials, hueFrom, confirmBox, mountErrorToasts,
   signInGate, setupGate, noStorageGate, noConnectionGate, identityChip
 } from "./common.js";
-import { syncXcallyBreak } from "./xcally-bridge.js";
+import { syncXcallyBreak, checkBridgeHealth } from "./xcally-bridge.js";
 
 const RING_R = 110;
 const CIRC = 2 * Math.PI * RING_R;
 const seen = {};
+
+/* ==================== Xcally bridge banner ====================
+   A browser tab can never install anything on its own - that's a
+   hard security boundary, not a BreakFlow choice. What it CAN do is
+   notice the bridge isn't answering and walk the agent through the
+   one-time setup themselves (see xcally-bridge/README.md). */
+const LS_BRIDGE_DISMISS = "breakflow.xcallyBridgeDismissUntil";
+let bridgeStatus = "unknown"; // "unknown" | "connected" | "missing"
+let bridgeCheckInFlight = false;
+let lastBridgeCheck = 0;
+const BRIDGE_CHECK_INTERVAL_MS = 30000;
+
+function bridgeDismissedUntil() {
+  try {
+    const v = localStorage.getItem(LS_BRIDGE_DISMISS);
+    if (!v) return 0;
+    if (v === "forever") return Infinity;
+    const n = Number(v);
+    return isFinite(n) ? n : 0;
+  } catch (e) { return 0; }
+}
+function setBridgeDismiss(v) {
+  try { localStorage.setItem(LS_BRIDGE_DISMISS, v); } catch (e) {}
+}
+function clearBridgeDismiss() {
+  try { localStorage.removeItem(LS_BRIDGE_DISMISS); } catch (e) {}
+}
+
+function maybeCheckBridge(now) {
+  if (bridgeCheckInFlight) return;
+  if (now - lastBridgeCheck < BRIDGE_CHECK_INTERVAL_MS) return;
+  lastBridgeCheck = now;
+  bridgeCheckInFlight = true;
+  checkBridgeHealth(1500).then((ok) => {
+    bridgeCheckInFlight = false;
+    const next = ok ? "connected" : "missing";
+    if (next !== bridgeStatus) {
+      bridgeStatus = next;
+      if (ok) clearBridgeDismiss();
+      render();
+    }
+  });
+}
+
+function xcallyBridgeBanner() {
+  return el("div", { class: "card pad-lg", style: { borderLeft: "3px solid #38bdf8" } }, [
+    el("div", { class: "row wrap", style: { alignItems: "center", gap: "12px" } }, [
+      el("span", { style: { fontSize: "22px" }, text: "🔌" }),
+      el("div", { style: { flex: "1 1 280px" } }, [
+        el("div", { style: { fontWeight: "660" }, text: "Link this PC's Xcally to your breaks" }),
+        el("div", { class: "small dim", text: "Optional, one-time setup - Xcally then shows you as on a break automatically, no browser tab required to keep it running." })
+      ]),
+      el("div", { class: "btn-row" }, [
+        el("button", { class: "btn sm primary", text: "Show me how", onclick: () => openBridgeSetup() }),
+        el("button", { class: "btn sm ghost", text: "Not on this PC", onclick: () => { setBridgeDismiss("forever"); render(); } }),
+        el("button", { class: "btn sm ghost", text: "Remind me later", onclick: () => { setBridgeDismiss(String(store.now() + 7 * 86400000)); render(); } })
+      ])
+    ])
+  ]);
+}
+
+function openBridgeSetup() {
+  const statusLine = el("p", { class: "small", text: "Not connected yet." });
+  const body = el("div", { class: "stack" }, [
+    el("p", {}, [
+      "This is a small program that runs quietly on ", el("b", { text: "this PC" }),
+      " and tells Xcally when your BreakFlow break starts and ends. It's separate from ",
+      "the website - the website can't install it for you, only guide you through it once."
+    ]),
+    el("ol", { class: "small", style: { paddingLeft: "20px", lineHeight: "1.7" } }, [
+      el("li", {}, [
+        "Download the ", el("b", { text: "xcally-bridge" }), " folder from the repo: ",
+        el("a", { href: "https://github.com/mnassereldeen-commits/breakflow/tree/main/xcally-bridge", target: "_blank", rel: "noopener", text: "open on GitHub" }),
+        " (grab both files, keep them in the same folder)."
+      ]),
+      el("li", {}, ["Open that folder and follow the steps in its ", el("b", { text: "README.md" }), " under “Starting it automatically” - either a Startup-folder shortcut or a Task Scheduler entry. Either takes a couple of minutes, once."]),
+      el("li", {}, ["Come back here and press “Check now” below."])
+    ]),
+    statusLine
+  ]);
+  modal("Link Xcally to your breaks", body, [
+    { label: "Close", kind: "ghost" },
+    {
+      label: "Check now", kind: "primary", keepOpen: true, onClick: async () => {
+        statusLine.textContent = "Checking…";
+        const ok = await checkBridgeHealth(2500);
+        bridgeStatus = ok ? "connected" : "missing";
+        if (ok) {
+          clearBridgeDismiss();
+          statusLine.textContent = "✓ Connected! You can close this.";
+          toast("Xcally bridge connected", "ok");
+          render();
+        } else {
+          statusLine.textContent = "Still not answering - give it a few seconds after finishing the steps above, then try again.";
+        }
+      }
+    }
+  ]);
+}
 
 /* ==================== boot ==================== */
 setFavicon();
@@ -41,6 +140,7 @@ function loop() {
   const now = store.now();
   tickClocks(now);
   watchMine(now);
+  maybeCheckBridge(now);
 }
 
 /* ==================== render ==================== */
@@ -63,6 +163,10 @@ function render() {
 
   const now = store.now();
   const mine = mySession(state, store.uid());
+
+  if (bridgeStatus === "missing" && now > bridgeDismissedUntil()) {
+    main.append(xcallyBridgeBanner());
+  }
 
   main.append(el("div", { class: "split" }, [
     el("div", { class: "stack" }, [

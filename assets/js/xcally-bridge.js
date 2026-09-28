@@ -45,3 +45,20 @@ export function syncXcallyBreak(onBreakNow) {
   lastSynced = now;
   ping(now ? "/break" : "/ready");
 }
+
+/** Does 127.0.0.1:8907 answer right now? Resolves false rather than
+ *  rejecting - a missing/unreachable bridge is the normal, expected
+ *  case for anyone who hasn't set it up (or hasn't on this PC). */
+export function checkBridgeHealth(timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    try {
+      const ctrl = new AbortController();
+      setTimeout(() => { ctrl.abort(); finish(false); }, timeoutMs || 1500);
+      fetch(BRIDGE_URL + "/health", { method: "GET", signal: ctrl.signal })
+        .then((r) => finish(!!r.ok))
+        .catch(() => finish(false));
+    } catch (e) { finish(false); }
+  });
+}
