@@ -41,42 +41,52 @@ reason takes effect immediately; going back to Ready is confirmed by
 Xcally's own server and can take several seconds to show on screen —
 the bridge fires the request and returns, it doesn't wait for that.
 
-## Running it
+## Setting it up (the easy way)
+
+Double-click **`Setup.bat`**. That's the whole thing — no PowerShell
+window, no right-click menus, nothing to type. It calls `Install.ps1`
+(below) for you, which sets the bridge to start every time this PC
+signs in and starts it right now.
+
+The BreakFlow page itself can walk an agent through this: the "Link
+this PC's Xcally to your breaks" banner's **Download** button fetches
+`XcallyBridge.ps1`, `Install.ps1` and `Setup.bat` together (they have
+to stay in the same folder — the default Downloads folder is fine),
+and the modal's instructions are just "double-click Setup.bat, then
+come back and press Check now."
+
+## Setting it up (by hand)
+
+```
+powershell -ExecutionPolicy Bypass -File .\Install.ps1
+```
+
+Does the same thing as `Setup.bat`, from a PowerShell window. Tries a
+scheduled task first (restarts itself if it ever crashes); if
+registering an "at log on" trigger isn't available in that session —
+it needs a real interactive logon, and some remote/automated shells
+don't have one, even for an admin account — it automatically falls
+back to an ordinary Startup-folder shortcut instead, which works
+everywhere.
+
+To remove it again, either direction:
+
+```
+powershell -ExecutionPolicy Bypass -File .\Uninstall.ps1
+```
+
+Stops the bridge if it's running and removes whichever auto-start
+`Install.ps1` set up. Xcally itself is never touched.
+
+For testing without any of that — no auto-start, just this once, this
+window — run:
 
 ```
 powershell -ExecutionPolicy Bypass -File .\XcallyBridge.ps1
 ```
 
-Leaves a `bridge.log` next to the script. Ctrl+C stops it.
-
-## Starting it automatically
-
-**I didn't set this up** — Claude Code's own safety layer blocks me from
-creating anything that registers a program to run automatically (a
-scheduled task, a Startup-folder entry, etc.), even an *un*installer for
-one, regardless of the reason. That's a deliberate guardrail, not a bug,
-so I'm not going to route around it — this needs your own hands on the
-keyboard. Options, easiest first:
-
-1. **Startup folder (simplest).** Press `Win+R`, type `shell:startup`,
-   Enter. In that folder, right-click → New → Shortcut → point it at
-   `powershell.exe` with these arguments:
-   ```
-   -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\path\to\xcally-bridge\XcallyBridge.ps1"
-   ```
-   Runs every time you sign in. To stop it running automatically, delete
-   the shortcut.
-
-2. **Task Scheduler (more robust — restarts itself if it crashes).**
-   Open Task Scheduler → Create Task… → General: name it, "Run only
-   when user is logged on". Triggers: New → At log on. Actions: New →
-   `powershell.exe`, arguments
-   `-ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\path\to\xcally-bridge\XcallyBridge.ps1"`.
-   Settings: check "Restart the task if it fails", a few times, 1 minute
-   apart. To remove it later: Task Scheduler → find it → Delete.
-
-Either way, for testing today without any of that, just run the command
-above in a PowerShell window and leave it open.
+Leaves a `bridge.log` next to the script either way. Ctrl+C stops the
+foreground version.
 
 ## Per-agent setup
 
