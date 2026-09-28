@@ -80,22 +80,50 @@ function xcallyBridgeBanner() {
   ]);
 }
 
+/**
+ * Triggers real, ordinary file downloads - a page can do that on a
+ * click, same as any "download our app" button anywhere. It still
+ * cannot run anything on the PC afterward; nothing can, from a
+ * webpage, that's the actual security boundary. A second file starting
+ * to download without its own separate click is enough that some
+ * browsers ask the visitor to allow it once per site - that's the
+ * browser protecting against a page silently downloading a pile of
+ * files, and it's expected here, not an error.
+ */
+function downloadBridgeFiles() {
+  const files = [
+    ["xcally-bridge/XcallyBridge.ps1", "XcallyBridge.ps1"],
+    ["xcally-bridge/Install.ps1", "Install.ps1"]
+  ];
+  files.forEach(([path, name], i) => {
+    setTimeout(() => {
+      const a = el("a", { href: path, download: name });
+      document.body.append(a);
+      a.click();
+      a.remove();
+    }, i * 350);
+  });
+}
+
 function openBridgeSetup() {
   const statusLine = el("p", { class: "small", text: "Not connected yet." });
   const body = el("div", { class: "stack" }, [
     el("p", {}, [
       "This is a small program that runs quietly on ", el("b", { text: "this PC" }),
-      " and tells Xcally when your BreakFlow break starts and ends. It's separate from ",
-      "the website - the website can't install it for you, only guide you through it once."
+      " and tells Xcally when your BreakFlow break starts and ends."
     ]),
-    el("ol", { class: "small", style: { paddingLeft: "20px", lineHeight: "1.7" } }, [
-      el("li", {}, [
-        "Download the ", el("b", { text: "xcally-bridge" }), " folder from the repo: ",
-        el("a", { href: "https://github.com/mnassereldeen-commits/breakflow/tree/main/xcally-bridge", target: "_blank", rel: "noopener", text: "open on GitHub" }),
-        " (grab both files, keep them in the same folder)."
-      ]),
-      el("li", {}, ["Open that folder and follow the steps in its ", el("b", { text: "README.md" }), " under “Starting it automatically” - either a Startup-folder shortcut or a Task Scheduler entry. Either takes a couple of minutes, once."]),
-      el("li", {}, ["Come back here and press “Check now” below."])
+    el("div", { class: "btn-row" }, [
+      el("button", { class: "btn primary", text: "⬇  Download", onclick: () => downloadBridgeFiles() })
+    ]),
+    el("ol", { class: "small", style: { paddingLeft: "20px", lineHeight: "1.7", marginTop: "10px" } }, [
+      el("li", {}, ["Two files download - your browser may ask to allow it, since that's more than one at once. Choose ", el("b", { text: "Allow" }), "."]),
+      el("li", {}, ["Open your ", el("b", { text: "Downloads" }), " folder. Right-click ", el("b", { text: "Install.ps1" }), " → ", el("b", { text: "Run with PowerShell" }), "."]),
+      el("li", {}, ["A window flashes and closes - that's it done. Come back here and press ", el("b", { text: "Check now" }), " below."])
+    ]),
+    el("p", { class: "muted small", text: "Nothing here can run that program for you - only you clicking “Run with PowerShell” can. That's a real security boundary, not this site being unhelpful." }),
+    el("p", { class: "small dim" }, [
+      "Prefer to look at the files first, or set several PCs up at once? ",
+      el("a", { href: "https://github.com/mnassereldeen-commits/breakflow/tree/main/xcally-bridge", target: "_blank", rel: "noopener", text: "open the folder on GitHub" }), "."
     ]),
     statusLine
   ]);
