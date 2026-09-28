@@ -226,6 +226,21 @@ python -m http.server 8080
 For GitHub Pages: push to `main`, then **Settings → Pages → Deploy from a branch → `main` /
 `/ (root)`**. The `.nojekyll` file stops Pages mangling `assets/`.
 
+**GitHub Pages caches every file for 10 minutes** (`Cache-Control: max-age=600`,
+fixed - Pages doesn't support custom headers), with no build step to fingerprint
+filenames. A returning agent's browser can keep running JS from before your
+change until that cache expires - worse, indefinitely, if their tab was never
+reloaded since. `index.html` and `admin.html` load their script with a
+`?v=YYYYMMDDx` query string for exactly this reason (`assets/js/agent.js?v=20260928a` -
+bump the letter same-day, the date otherwise). **Whenever `agent.js` or
+`admin.js` changes, bump that query string** so the next reload - whenever it
+happens - is guaranteed to fetch it fresh, not serve a stale cached copy.
+Files those two `import` (`store.js`, `common.js`, `engine.js`, `firebase.js`,
+`xcally-bridge.js`, `config.js`) aren't independently versioned - a brand new
+file is never stale (nothing to have cached), but an *edit* to one of those
+shared files rides along on the next `agent.js`/`admin.js` bump rather than
+having its own.
+
 ## Files
 
 | Path | What it is |
