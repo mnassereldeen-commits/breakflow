@@ -239,7 +239,7 @@ For GitHub Pages: push to `main`, then **Settings → Pages → Deploy from a br
 | `assets/js/admin.js` | Admin UI |
 | `assets/js/common.js` | Shared UI (sign-in, modals, toasts, sound, CSV…) |
 | `assets/js/config.js` | Firebase project config + shipped defaults for a fresh database |
-| `assets/js/xcally-bridge.js` | Optional: tells a local per-PC helper when *this* agent's break starts/ends, so Xcally's pause status follows along. No-ops if the helper isn't installed. See `xcally-bridge/` at the repo root. |
+| `assets/js/xcally-bridge.js` | Optional: tells a local per-PC helper when *this* agent's break starts, and again the moment they tap **I'm back** (never any other way a session can close), so Xcally's pause status follows along without ever being set Ready on their behalf. No-ops if the helper isn't installed. See `xcally-bridge/` at the repo root. |
 | `assets/css/app.css` | Design system |
 | `tests/` | Engine and store tests (see Tests) |
 

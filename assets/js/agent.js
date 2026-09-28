@@ -364,6 +364,9 @@ function myBreakCard(state, s, now) {
     el("button", {
       class: "btn lg primary", onclick: () => {
         endBreak(s.id, me().name);
+        /* Xcally only ever goes back to Ready from the agent's own tap
+           here - never automatically. See the note in watchMine(). */
+        syncXcallyBreak(false);
         stopFlash();
         toast("Welcome back – break closed", "ok");
       }
@@ -522,20 +525,23 @@ function tickClocks(now) {
 function watchMine(now) {
   if (!me()) return;
   const s = mySession(store.state, store.uid());
-  /* Xcally should only show Break once the agent has actually left the
-     floor - not while merely queued, and not during the "are you
-     ready?" window, since they're still at their desk for that. */
-  if (!s) { syncXcallyBreak(false); stopFlash(); setBaseTitle("BreakFlow"); return; }
+  /* Xcally is only ever set back to Ready by the agent's own "I'm back"
+     tap (see myBreakCard) - never from here, and never just because
+     this tab no longer sees an open session. A session can close
+     without the agent being at their desk yet (an admin closing it
+     from the Live board, a denied/cancelled queue entry, a restored
+     backup...) and Xcally must not start routing them real calls on
+     the strength of that. Marking Break is the safe direction and
+     stays automatic below; marking Ready is not, so it isn't. */
+  if (!s) { stopFlash(); setBaseTitle("BreakFlow"); return; }
   const f = seen[s.id] || (seen[s.id] = {});
 
   if (s.state === STATES.QUEUED) {
-    syncXcallyBreak(false);
     setBaseTitle("#" + queuePosition(store.state, s) + " in queue · BreakFlow");
     return;
   }
 
   if (s.state === STATES.READY) {
-    syncXcallyBreak(false);
     const left = Math.max(0, (s.readyDeadline || now) - now);
     if (!f.readyNotified) {
       f.readyNotified = true;

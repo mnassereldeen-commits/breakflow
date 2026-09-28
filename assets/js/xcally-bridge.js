@@ -33,11 +33,24 @@ function ping(path) {
 let lastSynced = null; // null | true | false - null forces one sync on first call
 
 /**
- * Call every tick with whether THIS agent is currently actually away on
- * break (ACTIVE or OVER - not merely queued or offered a slot). Only
- * fires a request on an actual change, so a normal second-by-second
- * call costs nothing once settled, and a page reload sends exactly one
- * reconciling call instead of trusting whatever the helper last heard.
+ * Tell the bridge whether this agent should show as away on break.
+ *
+ * Deliberately asymmetric: `true` is called reactively, every tick, the
+ * moment the agent's session is genuinely ACTIVE/OVER - by a confirmed
+ * start, an auto-start, or an admin putting them on break, it doesn't
+ * matter which; marking Break only ever stops calls being routed to
+ * them, which is the safe direction to be eager about.
+ *
+ * `false` is never called reactively - only from the agent's own "I'm
+ * back" tap (see agent.js). A session can close without the agent
+ * actually being back at their desk (an admin closing it remotely, a
+ * denied queue entry, a restored backup...), and Xcally must not start
+ * routing them real calls on the strength of that alone.
+ *
+ * Either way, only fires a request on an actual change, so a normal
+ * second-by-second call costs nothing once settled, and a page reload
+ * sends at most one reconciling call instead of trusting whatever the
+ * bridge last heard.
  */
 export function syncXcallyBreak(onBreakNow) {
   const now = !!onBreakNow;
