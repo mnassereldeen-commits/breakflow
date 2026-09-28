@@ -133,6 +133,18 @@ function Set-XcallyBreak {
     }
     $combo = Get-ReasonCombo $uc
     if (-not $combo) { throw "Could not find the pause-reason list." }
+    # WPF only realises each item's bound text the first time this dropdown
+    # is actually expanded in this PhoneBar process's lifetime - before
+    # that, every item's TextBlock reports an empty Name even though the
+    # data is there. A PhoneBar nobody has ever opened this menu on (a
+    # fresh sign-in, exactly what happens after Install.ps1 (re)starts
+    # the bridge) hit this: every reason looked unnamed and "Break"
+    # could never be found. Expanding it here - harmless if already
+    # expanded - forces that realisation before searching.
+    $expandPattern = $null
+    if ($combo.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$expandPattern)) {
+        try { $expandPattern.Expand(); Start-Sleep -Milliseconds 250 } catch {}
+    }
     $item = Find-First $combo {
         param($e)
         if ($e.Current.ControlType -ne [System.Windows.Automation.ControlType]::ListItem) { return $false }
